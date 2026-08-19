@@ -1,0 +1,17 @@
+# core policy + perception (install a CUDA build of torch/torchvision first)
+torch>=2.4
+torchvision
+timm>=0.9
+einops
+numpy
+opencv-python-headless
+pyyaml
+huggingface_hub
+# WildDet3D backbone (third_party/wilddet3d, third_party/sam3, third_party/mdm)
+vis4d
+utils3d
+# robot silhouette from the URDF (gam/perception/arm_render.py)
+yourdfpy
+trimesh
+fast-simplification   # optional: mesh decimation for URDF silhouettes
+# optional tracking (CoTracker3):  pip install git+https://github.com/facebookresearch/co-tracker.git

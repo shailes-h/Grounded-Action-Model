@@ -1,0 +1,12 @@
+# AgentConfig fields (gam/deploy/agent.py)
+policy_ckpt: weights/gam_policy.pt
+wilddet_ckpt: weights/wilddet3d.pt
+tracker_ckpt: weights/cotracker_scaled_online.pth   # optional; null -> planner points held
+planner_url: http://127.0.0.1:18092
+geometry_source: box2d_depth   # box2d_depth (WildDet3D 2D box + depth, default) | box3d (oriented 3D box)
+n_points: 512
+observe_every: 30           # planner memory update period (control steps)
+n_exec: 15                  # execute 15 of the 16 predicted steps, then re-plan
+smooth_seam: true
+gripper_dims: [6, 13]
+device: cuda

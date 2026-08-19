@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------- data (episode schema)
+# Point the keys at YOUR HDF5 layout — the reader is fully driven by this map.
+data:
+  episodes_glob: /path/to/episodes/episode_*.hdf5
+  rgb_key: vision/cam_head/colors            # (T,H,W,3) uint8  OR (T,) JPEG bytes
+  depth_key: vision/cam_head/depth           # (T,H,W)
+  depth_unit: mm                             # mm | m
+  intrinsic_key: vision/cam_head/intrinsic   # (3,3) or (T,3,3)
+  extrinsic_key: vision/cam_head/extrinsic   # (3,4)/(T,3,4) base->camera (OpenCV)  OR 4x4 camera pose
+  extrinsic_is_cam2base: false               # true if extrinsic_key is the 4x4 camera pose in base frame
+  state_key: joint_state/vector              # (T,14)  [arm_L(6), grip_L, arm_R(6), grip_R]
+  action_key: joint_action/vector            # (T,14)  absolute joint targets, same layout
+  instruction_key: instruction               # optional
+  slots: [object]                            # object slots, manipulated object first
+  clicks:
+    source: project_centers                  # project_centers | dataset
+    centers_key_fmt: object_gt/{slot}/p      # (T,3) world centres per slot (project_centers)
+    dataset_key: clicks                      # (S,2) frame-0 px or (T,S,2) per-frame (dataset)
+  val_episodes: 2                            # last N episodes held out for eval
+
+# ---------------------------------------------------------------- perception
+perception:
+  wilddet_ckpt: /path/to/wilddet3d.pt
+  image_channel_swap: false                  # true only if your recordings store swapped channels
+  patch_grid: 16                             # patch tokens = grid x grid (16 -> 256, 24 -> 576)
+  geometry_source: box2d_depth               # object geometry / point-cloud crop from:
+                                             #   box2d_depth = WildDet3D 2D box + depth backprojection (axis-aligned)
+                                             #   box3d       = WildDet3D predicted oriented 3D box
+  n_points: 512                              # points per object slot
+  robot:                                     # robot silhouette from the URDF (required for parity
+    urdf: /path/to/robot.urdf                # with training-time patch masks; null section = no mask)
+    joint_names: [j1, j2, j3, j4, j5, j6, g1, j7, j8, j9, j10, j11, j12, g2]
+    T_base_root: [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+    link_filter: [arm_, gripper_]            # render only these links (speed)
+
+# ---------------------------------------------------------------- training
+train:
+  cache_dir: /path/to/cache                  # precompute output / train input
+  out_dir: /path/to/runs/yam_task            # checkpoints + logs
+  horizon: 16
+  n_action_steps: 16
+  state_hist: 2
+  batch_size: 16
+  lr: 2.0e-4
+  weight_decay: 1.0e-3
+  warmup_steps: 1000
+  max_steps: 25000
+  save_every: 1000
+  state_dropout: 0.2                         # zero the whole state token (forces visual grounding)
+  det_xyz_dropout: 0.1                       # zero the object 3D centre channel per sample
+  attn_dropout: 0.1                          # transformer attention dropout (training only)
+  num_workers: 8
+  seed: 42
+  # model (defaults = the published architecture; change only if you know why)
+  n_emb: 576
+  n_layer: 12
+  n_head: 16
+  tokens_per_slot: 8
+  pcd_dim: 512

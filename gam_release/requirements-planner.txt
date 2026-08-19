@@ -1,0 +1,11 @@
+# Molmo2 planner service (gam/planner/server.py) — separate environment
+torch>=2.4
+transformers==4.57.1
+accelerate
+einops
+pillow
+numpy
+opencv-python-headless
+huggingface_hub
+decord2
+molmo_utils
