@@ -13,9 +13,11 @@ data:
   instruction_key: instruction               # optional
   slots: [object]                            # object slots, manipulated object first
   clicks:
-    source: project_centers                  # project_centers | dataset | language
+    source: project_centers                  # project_centers | dataset | annotations | language
     centers_key_fmt: object_gt/{slot}/p      # (T,3) world centres per slot (project_centers)
     dataset_key: clicks                      # (S,2) frame-0 px or (T,S,2) per-frame (dataset)
+    # annotations source: labeling/annotator.py marks (picks then places, held constant)
+    # annotations_dir: /path/annotations      # (annotations)
     # language source: instruction -> gam.text segmenter -> pointing service -> frame-0 clicks
     # grounding_url: http://127.0.0.1:18092   # gam/planner/server.py (language)
     # segmenter_ckpt: /path/t5_segmenter.pt   # text/train_segmenter.py output (language)

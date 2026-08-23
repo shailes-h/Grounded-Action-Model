@@ -7,6 +7,8 @@ frame, or projected from known 3D object centres). See configs/example.yaml.
 from __future__ import annotations
 
 import glob
+import os
+import json
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -99,6 +101,20 @@ def load_episode(path: str, cfg: dict) -> Episode:
                 uv = project(P[t], K[t], E[t])
                 if uv is not None:
                     clicks[t, s_i] = uv
+    elif csrc == "annotations":                                  # labeling/annotator.py output
+        ap = os.path.join(d["clicks"]["annotations_dir"],
+                          os.path.splitext(os.path.basename(path))[0] + ".json")
+        if os.path.exists(ap):
+            pts = json.load(open(ap)).get("points", [])
+            ordered = ([p_["point"] for p_ in pts if p_["role"] == "pick"]
+                       + [p_["point"] for p_ in pts if p_["role"] == "place"])
+            if len(ordered) != S:
+                print(f"[episodes] WARNING {os.path.basename(path)}: {len(ordered)} marks for "
+                      f"{S} slots (order = picks then places, must match data.slots)")
+            for s_i in range(min(S, len(ordered))):
+                clicks[:, s_i] = np.asarray(ordered[s_i], np.float32)
+        else:
+            print(f"[episodes] WARNING no annotation for {os.path.basename(path)}")
     elif csrc == "language":
         pass          # filled by text/language_clicks.py from the instruction (frame-0, held constant)
     else:

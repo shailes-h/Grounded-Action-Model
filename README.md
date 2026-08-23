@@ -134,6 +134,20 @@ same checkpoints.
 | loss plateaus high | check `verify.py` first — geometry bugs cap imitation quality |
 | eval MAE fine but robot fails closed-loop | harness obs conventions differ from data (depth unit, extrinsics, state layout) |
 
+## Labeling: pick/place click annotator
+
+No simulator ground truth and no recorded clicks? Mark them by hand:
+
+```bash
+python labeling/annotator.py --config configs/my_task.yaml   # -> http://127.0.0.1:8870
+```
+
+Two marks only — **1 = pick** (green), **2 = place** (orange): scrub to any frame, press
+1 or 2, click the object (click a mark again to delete it). Autosaves one JSON per episode.
+Point the config at the result with `data.clicks: {source: annotations, annotations_dir: ...}`;
+each episode's clicks become [picks (click order), then places], held constant over time —
+the order must match `data.slots` (manipulated object first).
+
 ## Text: object-word segmenter (T5)
 
 `gam.text.T5ObjectSegmenter` turns an instruction into the object noun phrases it names,
