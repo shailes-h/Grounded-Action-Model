@@ -99,6 +99,8 @@ def load_episode(path: str, cfg: dict) -> Episode:
                 uv = project(P[t], K[t], E[t])
                 if uv is not None:
                     clicks[t, s_i] = uv
+    elif csrc == "language":
+        pass          # filled by text/language_clicks.py from the instruction (frame-0, held constant)
     else:
         raise ValueError(f"unknown clicks.source {csrc!r}")
     instr = ""

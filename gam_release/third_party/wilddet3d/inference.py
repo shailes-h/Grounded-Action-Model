@@ -306,9 +306,12 @@ class WildDet3DPredictor(nn.Module):
         return WildDet3DInput(
             images=images,
             intrinsics=intrinsics,
-            img_ids=torch.zeros(
-                n_prompts, dtype=torch.long, device=device
-            ),
+            # fix 0822: with a multi-image batch (one image per prompt) prompt i must
+            # index image i; all-zeros routed every prompt to image 0 and left
+            # prompts 2+ with empty predictions. Single-image calls are unchanged.
+            img_ids=(torch.arange(n_prompts, dtype=torch.long, device=device)
+                     if images.shape[0] == n_prompts and n_prompts > 1
+                     else torch.zeros(n_prompts, dtype=torch.long, device=device)),
             text_ids=torch.arange(
                 n_prompts, dtype=torch.long, device=device
             ),
@@ -354,9 +357,12 @@ class WildDet3DPredictor(nn.Module):
         return WildDet3DInput(
             images=images,
             intrinsics=intrinsics,
-            img_ids=torch.zeros(
-                n_prompts, dtype=torch.long, device=device
-            ),
+            # fix 0822: with a multi-image batch (one image per prompt) prompt i must
+            # index image i; all-zeros routed every prompt to image 0 and left
+            # prompts 2+ with empty predictions. Single-image calls are unchanged.
+            img_ids=(torch.arange(n_prompts, dtype=torch.long, device=device)
+                     if images.shape[0] == n_prompts and n_prompts > 1
+                     else torch.zeros(n_prompts, dtype=torch.long, device=device)),
             text_ids=torch.zeros(
                 n_prompts, dtype=torch.long, device=device
             ),
@@ -414,9 +420,12 @@ class WildDet3DPredictor(nn.Module):
         return WildDet3DInput(
             images=images,
             intrinsics=intrinsics,
-            img_ids=torch.zeros(
-                n_prompts, dtype=torch.long, device=device
-            ),
+            # fix 0822: with a multi-image batch (one image per prompt) prompt i must
+            # index image i; all-zeros routed every prompt to image 0 and left
+            # prompts 2+ with empty predictions. Single-image calls are unchanged.
+            img_ids=(torch.arange(n_prompts, dtype=torch.long, device=device)
+                     if images.shape[0] == n_prompts and n_prompts > 1
+                     else torch.zeros(n_prompts, dtype=torch.long, device=device)),
             text_ids=torch.zeros(
                 n_prompts, dtype=torch.long, device=device
             ),

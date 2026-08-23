@@ -91,7 +91,8 @@ class ObsEncoder(nn.Module):
     def __init__(self, d: int = 576, n_patch: int = 256, patch_dim: int = 1024, n_slots: int = 1,
                  tokens_per_slot: int = 8, fourier_L: int = 8, pcd_dim: int = 512,
                  state_dim: int = 28, image_wh: Sequence[float] = (320.0, 240.0),
-                 fuse_heads: int = 16, fuse_layers: int = 1, state_dropout: float = 0.0):
+                 fuse_heads: int = 16, fuse_layers: int = 1, state_dropout: float = 0.0,
+                 use_language: bool = False, lang_dim: int = 768):
         super().__init__()
         self.d, self.n_patch, self.n_slots, self.M = d, n_patch, n_slots, tokens_per_slot
         self.image_wh = (float(image_wh[0]), float(image_wh[1]))
@@ -107,8 +108,13 @@ class ObsEncoder(nn.Module):
         self.det_cam_emb = nn.Embedding(2, d)
         self.state_proj = nn.Sequential(nn.Linear(state_dim, d), nn.LayerNorm(d))
         self.state_dropout = float(state_dropout)   # training-only: whole state token zeroed
-        self.fuse = ConditionFusion(d, fuse_heads, [n_patch, n_slots * tokens_per_slot, 1], fuse_layers)
-        self.cond_len = n_patch + n_slots * tokens_per_slot + 1
+        self.use_language = bool(use_language)
+        if self.use_language:                       # one whole-sentence T5 token (optional)
+            self.lang_proj = nn.Sequential(nn.Linear(lang_dim, d), nn.LayerNorm(d))
+            self.lang_dim = int(lang_dim)
+        mods = [n_patch, n_slots * tokens_per_slot] + ([1] if self.use_language else []) + [1]
+        self.fuse = ConditionFusion(d, fuse_heads, mods, fuse_layers)
+        self.cond_len = sum(mods)
 
     def _fourier(self, x):
         a = x.unsqueeze(-1) * self.fourier_freqs
@@ -145,5 +151,13 @@ class ObsEncoder(nn.Module):
             keep = (torch.rand(B, 1, 1, device=dev) >= self.state_dropout).to(state_tok.dtype)
             state_tok = state_tok * keep
         ptok = self.patch_proj(obs["patch_tokens"].reshape(B, self.n_patch, -1).float().to(dev))
-        scene = torch.cat([ptok.to(state_tok.dtype), det_seq.to(state_tok.dtype), state_tok], 1)
+        toks = [ptok.to(state_tok.dtype), det_seq.to(state_tok.dtype)]
+        if self.use_language:                       # (B,lang_dim) sentence embedding; zeros = no instruction
+            lang = obs.get("lang")
+            if lang is None:
+                lang = torch.zeros(B, self.lang_dim, device=dev)
+            toks.append(self.lang_proj(lang.reshape(B, -1).float().to(dev)).unsqueeze(1)
+                        .to(state_tok.dtype))
+        toks.append(state_tok)
+        scene = torch.cat(toks, 1)
         return self.fuse(scene)

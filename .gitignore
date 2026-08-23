@@ -1,8 +1,7 @@
 __pycache__/
 *.pyc
-weights/
-runs/
-cache/
+_selfcheck/
 *.pt
-*.pth
-!examples/*.npz
+*.npz
+*.mp4
+_selfcheck_parity.py

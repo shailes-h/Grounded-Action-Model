@@ -1,0 +1,85 @@
+data:
+  episodes_glob: /gscratch/scrubbed/gehao/RMBench/data/battery_try/gt_arm/data/episode*.hdf5
+  rgb_key: observation/head_camera/rgb
+  depth_key: observation/head_camera/depth
+  depth_unit: mm
+  intrinsic_key: observation/head_camera/intrinsic_cv
+  extrinsic_key: observation/head_camera/extrinsic_cv
+  extrinsic_is_cam2base: false
+  state_key: joint_action/vector
+  action_key: joint_action/vector
+  slots:
+  - battery1
+  - battery2
+  - battery_slot
+  clicks:
+    source: project_centers
+    centers_key_fmt: object_gt/{slot}/p
+  val_episodes: 1
+perception:
+  wilddet_ckpt: /gscratch/scrubbed/gehao/wdtap/wilddet3d_rmbench_battery_v1.pt
+  image_channel_swap: true
+  patch_grid: 24
+  bf16: true
+  cell_min_overlap: 0.3
+  geometry_source: box2d_depth
+  n_points: 512
+  robot:
+    urdf: /gscratch/scrubbed/gehao/RMBench/assets/embodiments/aloha-agilex/urdf/arx5_description_isaac.urdf
+    joint_names:
+    - fl_joint1
+    - fl_joint2
+    - fl_joint3
+    - fl_joint4
+    - fl_joint5
+    - fl_joint6
+    - fl_joint7
+    - fr_joint1
+    - fr_joint2
+    - fr_joint3
+    - fr_joint4
+    - fr_joint5
+    - fr_joint6
+    - fr_joint7
+    T_base_root:
+    - - -0.0
+      - -1.0
+      - 0.0
+      - 0.0
+    - - 1.0
+      - -0.0
+      - 0.0
+      - -0.65
+    - - 0.0
+      - 0.0
+      - 1.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+      - 1.0
+    max_faces: 1500
+    joint_affine:
+      fl_joint7:
+      - -0.01
+      - 0.055
+      fr_joint7:
+      - -0.01
+      - 0.055
+    joint_mirror:
+      fl_joint8: fl_joint7
+      fr_joint8: fr_joint7
+train:
+  cache_dir: /gscratch/scrubbed/gehao/yam/_selfcheck/cache
+  out_dir: /gscratch/scrubbed/gehao/yam/_selfcheck/run
+  horizon: 16
+  batch_size: 16
+  n_action_steps: 16
+  state_hist: 2
+  lr: 0.0002
+  weight_decay: 0.001
+  warmup_steps: 100
+  max_steps: 800
+  save_every: 400
+  state_dropout: 0.2
+  det_xyz_dropout: 0.1

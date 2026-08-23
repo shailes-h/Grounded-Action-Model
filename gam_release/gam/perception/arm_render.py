@@ -77,6 +77,11 @@ class URDFArmMask:
     Args:
         urdf_path: robot URDF (mesh paths resolved relative to it / package dirs).
         joint_names: order of the actuated joints in your state vector (extra entries such as
+        joint_affine: {joint: [offset, scale]} — applied as q = offset + value*scale before
+            rendering, then clipped to the URDF joint limits. Use it when the recorded state
+            stores a normalized value (e.g. gripper 0..1) instead of the joint's native unit.
+        joint_mirror: {follower: leader} — the follower joint copies the leader's (mapped)
+            value; for parallel grippers whose second finger is not in the state vector.
             gripper values are ignored unless they name a URDF joint).
         T_base_root: 4x4 pose of the URDF root link in the policy's base frame (identity if
             your base frame IS the URDF root).
@@ -87,12 +92,16 @@ class URDFArmMask:
     """
 
     def __init__(self, urdf_path: str, joint_names: Sequence[str], T_base_root=None,
-                 collision: bool = False, max_faces: int = 3000,
+                 collision: bool = False, max_faces: int = 1500,
+                 joint_affine=None, joint_mirror=None,
                  link_filter: Optional[Sequence[str]] = None):
         import yourdfpy
         self.robot = yourdfpy.URDF.load(urdf_path, build_scene_graph=True, load_meshes=True,
                                         load_collision_meshes=collision, build_collision_scene_graph=collision)
         self.scene = self.robot.collision_scene if collision else self.robot.scene
+        self.joint_affine = {k: (float(v[0]), float(v[1])) for k, v in (joint_affine or {}).items()}
+        self.joint_mirror = dict(joint_mirror or {})
+        self._limits = {}
         self.joint_names = list(joint_names)
         self.T_base_root = np.eye(4) if T_base_root is None else np.asarray(T_base_root, np.float64)
         # geometry nodes to render (optionally restricted to some links), decimated once
@@ -117,10 +126,22 @@ class URDFArmMask:
                     pass
             self._nodes.append((node, np.asarray(m.vertices, np.float64), np.asarray(m.faces, np.int64)))
         self.n_faces = int(sum(len(f) for _, _, f in self._nodes))
+        for j in self.robot.robot.joints:
+            if j.limit is not None and j.limit.lower is not None:
+                self._limits[j.name] = (float(j.limit.lower), float(j.limit.upper))
 
     def link_meshes_world(self, q: np.ndarray):
         cfg = {n: float(v) for n, v in zip(self.joint_names, np.asarray(q).reshape(-1))
                if n in self.robot.actuated_joint_names}
+        for n, (off, sc) in (self.joint_affine or {}).items():
+            if n in cfg:
+                cfg[n] = off + cfg[n] * sc
+                lim = self._limits.get(n)
+                if lim is not None:
+                    cfg[n] = float(np.clip(cfg[n], lim[0], lim[1]))
+        for fol, led in (self.joint_mirror or {}).items():
+            if led in cfg and fol in self.robot.actuated_joint_names:
+                cfg[fol] = cfg[led]
         self.robot.update_cfg(cfg)
         out = []
         for node, v, f in self._nodes:

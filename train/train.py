@@ -33,20 +33,24 @@ def build_policy(cfg, ds) -> tuple:
     assert ds.eps[0]["patches"].shape[1] == n_patch, \
         f"cache patches {ds.eps[0]['patches'].shape[1]} != patch_grid^2 {n_patch} — re-run precompute"
     tps = int(t.get("tokens_per_slot", 8))
+    use_lang = bool(t.get("use_language", False))   # +1 whole-sentence T5 token in CondFuse
     config = dict(
         action_dim=int(ds.action_dim), horizon=int(t["horizon"]),
         n_action_steps=int(t["n_action_steps"]), num_inference_steps=10,
         n_emb=int(t.get("n_emb", 576)), n_layer=int(t.get("n_layer", 12)),
-        n_head=int(t.get("n_head", 16)), stream_split=[n_patch, S * tps, 1],
+        n_head=int(t.get("n_head", 16)),
+        stream_split=[n_patch, S * tps] + ([1] if use_lang else []) + [1],
         encoder=dict(n_patch=n_patch, patch_dim=1024, n_slots=S, tokens_per_slot=tps,
                      fourier_L=8, pcd_dim=int(t.get("pcd_dim", 512)),
                      state_dim=int(ds.action_dim) * int(t["state_hist"]),
                      fuse_heads=16, fuse_layers=1,
-                     state_dropout=float(t.get("state_dropout", 0.0))),
+                     state_dropout=float(t.get("state_dropout", 0.0)),
+                     use_language=use_lang),
         image_channel_swap=bool(cfg["perception"].get("image_channel_swap", False)),
         image_wh=list(ds.image_wh), train_image_wh=list(ds.image_wh),
         attn_dropout=float(t.get("attn_dropout", 0.0)),
         meta=dict(state_hist=int(t["state_hist"]), n_points=int(cfg["perception"].get("n_points", 512)),
+                  use_language=use_lang,
                   action=f"absolute joint targets, {ds.action_dim}-d", slots=cfg["data"]["slots"]),
     )
     policy = GAMPolicy(**{k: v for k, v in config.items() if k != "meta"})

@@ -58,6 +58,15 @@ def main():
         if t % 50 == 0:
             print(f"frame {t}/{ep.T}", flush=True)
     vw.release()
+    try:                    # mp4v is unplayable in many players — re-encode to H.264 when possible
+        import subprocess
+        import imageio_ffmpeg
+        tmp = out + ".h264.mp4"
+        subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error", "-i", out,
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "24", tmp], check=True)
+        os.replace(tmp, out)
+    except Exception as e:
+        print(f"[verify] H.264 re-encode skipped ({e}) — file is mp4v")
     ep.close()
     print("wrote", out, "\nVERIFY_DONE")
 

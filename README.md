@@ -31,7 +31,7 @@ Needs the GAM package (model + perception) and its vendored WildDet3D:
 ```bash
 conda create -n gam python=3.11 -y && conda activate gam
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-pip install -e ./gam_release                 # the GAM package (vendored in this branch)
+pip install -e /path/to/gam_release          # the GAM repository
 pip install h5py pyyaml matplotlib
 ```
 
@@ -133,3 +133,63 @@ same checkpoints.
 | robot not dimmed-in in `verify.py` | URDF `joint_names` order vs state vector, `T_base_root`, `link_filter` too narrow |
 | loss plateaus high | check `verify.py` first — geometry bugs cap imitation quality |
 | eval MAE fine but robot fails closed-loop | harness obs conventions differ from data (depth unit, extrinsics, state layout) |
+
+## Text: object-word segmenter (T5)
+
+`gam.text.T5ObjectSegmenter` turns an instruction into the object noun phrases it names,
+with their T5 embeddings — "pick up bowl" -> `[{"text": "bowl", "span": (8,12), "emb": (768,)}]`.
+A frozen **T5 text encoder** (default `google/flan-t5-base`) produces per-token features; a
+small O/B/I head tags which tokens belong to an object phrase. Only the head trains:
+
+```bash
+python text/train_segmenter.py --out t5_segmenter.pt [--extra-vocab my_words.txt]
+```
+
+Training data is synthesized (instruction templates x an object vocabulary, weak char-span
+labels projected onto T5 subwords); the vocabulary is split so reported accuracy is on
+object words the head has NEVER seen — it generalizes through T5's representation. Add your
+domain's nouns via `--extra-vocab` (one per line, multi-word phrases ok).
+
+Use at runtime:
+
+```python
+from gam.text import T5ObjectSegmenter
+seg = T5ObjectSegmenter.from_checkpoint("t5_segmenter.pt")
+for obj in seg.extract("put the red block into the battery slot"):
+    print(obj["text"])        # "red block", "battery slot" — grounding queries
+    obj["emb"]                # (d_model,) span embedding — language token for the policy
+```
+
+The segmenter's output IS the grounding language interface's input: set
+`data.clicks.source: language` and both `precompute` and `deploy_policy` build the object
+clicks from the instruction alone — phrases go to the pointing service
+(`gam/planner/server.py`, one "Point to the <phrase>." per unique phrase), returned pixels
+become the frame-0 clicks (`text/language_clicks.py`). Twin slots sharing one phrase
+("batteries" -> battery1, battery2) split the service's multiple points left-to-right; a
+slot the segmenter missed falls back to its own cleaned name as the query. The span
+embedding additionally serves as a language token if the policy is trained with one.
+
+**Language token (optional)** — the same T5 forward feeds two branches: ① the segmenter
+above (object spans -> grounding queries); ② the mean-pooled sentence embedding -> ONE
+language token in the policy's CondFuse (a 4th modality stream: patches, det, language,
+state). Enable with `train.use_language: true` + a top-level `text:` section; `precompute`
+then stores the sentence embedding per episode (`lang` in the npz) and `deploy_policy`
+computes it once per episode from the instruction. Off by default: enabling changes the
+condition length, so it is a train-time choice — checkpoints trained without it load
+unchanged.
+
+## Changelog
+
+**2026-08-22 — perception defaults refresh** (all on by default; each has an off switch)
+
+| change | default | why / how to disable |
+| --- | --- | --- |
+| batched WildDet3D forward | always | all clicks of a frame run as ONE forward (one image per prompt). Needs the vendored `third_party/wilddet3d/inference.py` `img_ids` fix (all-zeros routed every prompt to image 0, leaving prompts 2+ empty). Verified numerically equivalent to per-click forwards. |
+| bfloat16 autocast | `perception.bf16: true` | ~40% faster per frame; 2D/3D boxes move <1px / 3e-3, patch features shift slightly. `bf16: false` reproduces fp32 caches bit-for-bit. Keep precompute and eval on the SAME setting. |
+| patch grid 24x24 | `perception.patch_grid: 24` | finer masks; checkpoint must match (`encoder.n_patch = 576`). Old 16x16 checkpoints: set 16. |
+| cell keep rule: >=30% overlap, no expansion | `perception.cell_min_overlap: 0.30` | a cell is kept only if an object 2D box covers >=30% of it (pixel-exact). Replaces the old "touched cells +-1 ring", which kept far too much background. Masks from the old rule are NOT compatible — re-precompute before training against the new rule. |
+| URDF decimation 1500 faces | `perception.robot.max_faces: 1500` | silhouettes need few triangles; big render speedup, no visible mask change. |
+| async arm silhouette (eval) | automatic | the silhouette needs only proprioception, so `deploy_policy` renders it on a worker thread while WildDet3D runs; with `mask_level: "feature"` the mask is consumed after the forwards, so its cost leaves the critical path. |
+
+Caches/checkpoints produced before this refresh mix the old grid/cell-rule/fp32 conventions —
+do not mix them with new ones: re-run `precompute` and retrain when switching.

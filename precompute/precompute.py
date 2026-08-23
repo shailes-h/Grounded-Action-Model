@@ -30,7 +30,8 @@ def build_arm_mask_fn(cfg):
         return None
     from gam.perception.arm_render import URDFArmMask
     m = URDFArmMask(r["urdf"], r["joint_names"], T_base_root=np.asarray(r["T_base_root"], np.float64),
-                    link_filter=r.get("link_filter"))
+                    link_filter=r.get("link_filter"), max_faces=int(r.get("max_faces", 1500)),
+                    joint_affine=r.get("joint_affine"), joint_mirror=r.get("joint_mirror"))
     print(f"[precompute] URDF silhouette: {len(m._nodes)} geometries, {m.n_faces} faces")
     return m
 
@@ -55,7 +56,7 @@ def process_episode(ep, ext, arm_fn, cfg, out_path):
     S = len(cfg["data"]["slots"])
     n_pts = int(cfg["perception"].get("n_points", 512))
     geom_src = cfg["perception"].get("geometry_source", "box2d_depth")
-    G2 = int(cfg["perception"].get("patch_grid", 16)) ** 2
+    G2 = int(cfg["perception"].get("patch_grid", 24)) ** 2
     T = ep.T
     patches = np.zeros((T, G2, 1024), np.float16)
     box2d = np.zeros((T, S, 4), np.float32)
@@ -93,7 +94,8 @@ def process_episode(ep, ext, arm_fn, cfg, out_path):
     np.savez_compressed(tmp, state=ep.state, action=ep.action, patches=patches, box2d=box2d,
                         xyz=xyz, boxgeo=boxgeo, pcd_pts=pcd_pts, pcd_mask=pcd_mask,
                         clicks=ep.clicks, image_wh=np.array([W0, H0], np.float32),
-                        instruction=np.str_(ep.instruction))
+                        instruction=np.str_(ep.instruction),
+                        **({"lang": ep.lang_emb} if getattr(ep, "lang_emb", None) is not None else {}))
     os.replace(tmp, out_path)
 
 
@@ -110,7 +112,9 @@ def main():
     from gam.perception.patch_tokens import PatchTokenExtractor
     ext = PatchTokenExtractor(cfg["perception"]["wilddet_ckpt"],
                               channel_swap=bool(cfg["perception"].get("image_channel_swap", False)),
-                              grid=int(cfg["perception"].get("patch_grid", 16)))
+                              grid=int(cfg["perception"].get("patch_grid", 24)),
+                              bf16=bool(cfg["perception"].get("bf16", True)),
+                              cell_min_overlap=float(cfg["perception"].get("cell_min_overlap", 0.30)))
     arm_fn = build_arm_mask_fn(cfg)
     for i, path in enumerate(eps):
         name = os.path.splitext(os.path.basename(path))[0]
@@ -120,10 +124,20 @@ def main():
             continue
         print(f"[{i + 1}/{len(eps)}] {name}")
         ep = load_episode(path, cfg)
+        lang_emb = None
+        if cfg.get("text"):                        # whole-sentence T5 token (train.use_language)
+            from text.language_clicks import sentence_embedding
+            lang_emb = sentence_embedding(cfg, ep.instruction).astype(np.float32)
+        if cfg["data"]["clicks"]["source"] == "language":
+            from text.language_clicks import clicks_from_language
+            px, queries = clicks_from_language(cfg, ep.rgb(0), ep.instruction)
+            ep.clicks[:] = px[None]
+            print(f"    language clicks: {dict(zip(cfg['data']['slots'], queries))}")
+        ep.lang_emb = lang_emb
         process_episode(ep, ext, arm_fn, cfg, out)
         ep.close()
     json.dump({"slots": cfg["data"]["slots"], "n_points": cfg["perception"].get("n_points", 512),
-               "patch_grid": int(cfg["perception"].get("patch_grid", 16)),
+               "patch_grid": int(cfg["perception"].get("patch_grid", 24)),
                "geometry_source": cfg["perception"].get("geometry_source", "box2d_depth")},
               open(os.path.join(out_dir, "meta.json"), "w"))
     print("PRECOMPUTE_DONE")

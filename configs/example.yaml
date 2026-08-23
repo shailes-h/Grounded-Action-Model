@@ -13,16 +13,25 @@ data:
   instruction_key: instruction               # optional
   slots: [object]                            # object slots, manipulated object first
   clicks:
-    source: project_centers                  # project_centers | dataset
+    source: project_centers                  # project_centers | dataset | language
     centers_key_fmt: object_gt/{slot}/p      # (T,3) world centres per slot (project_centers)
     dataset_key: clicks                      # (S,2) frame-0 px or (T,S,2) per-frame (dataset)
+    # language source: instruction -> gam.text segmenter -> pointing service -> frame-0 clicks
+    # grounding_url: http://127.0.0.1:18092   # gam/planner/server.py (language)
+    # segmenter_ckpt: /path/t5_segmenter.pt   # text/train_segmenter.py output (language)
   val_episodes: 2                            # last N episodes held out for eval
 
 # ---------------------------------------------------------------- perception
 perception:
   wilddet_ckpt: /path/to/wilddet3d.pt
   image_channel_swap: false                  # true only if your recordings store swapped channels
-  patch_grid: 16                             # patch tokens = grid x grid (16 -> 256, 24 -> 576)
+  patch_grid: 24                             # patch tokens = grid x grid (16 -> 256, 24 -> 576)
+  bf16: true                                 # autocast bfloat16 for the whole perception forward
+                                             # (~40% faster; boxes move <1px vs fp32 — set false
+                                             # to reproduce old fp32 caches bit-for-bit)
+  cell_min_overlap: 0.30                     # keep a patch cell only if an object 2D box covers
+                                             # >= this fraction of it (pixel-exact; no cell
+                                             # expansion). 0 = any touched cell, still no expansion
   geometry_source: box2d_depth               # object geometry / point-cloud crop from:
                                              #   box2d_depth = WildDet3D 2D box + depth backprojection (axis-aligned)
                                              #   box3d       = WildDet3D predicted oriented 3D box
@@ -32,6 +41,20 @@ perception:
     joint_names: [j1, j2, j3, j4, j5, j6, g1, j7, j8, j9, j10, j11, j12, g2]
     T_base_root: [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
     link_filter: [arm_, gripper_]            # render only these links (speed)
+    max_faces: 1500                          # decimate meshes above this triangle count
+                                             # (silhouettes need few faces; big speed win)
+    # joint_affine: {gripper_j: [offset, scale]}  # q = offset + value*scale, clipped to URDF
+                                             # limits — for normalized gripper values in state
+    # joint_mirror: {finger2_j: gripper_j}   # second finger copies the first (not in state)
+
+# ---------------------------------------------------------------- text (optional)
+# One instruction -> frozen T5 encoder -> two branches:
+#   1) the object-word segmenter (grounding queries; see clicks.source: language)
+#   2) mean-pooled sentence embedding -> ONE language token in the policy's CondFuse
+#      (enable with train.use_language: true; cache must be precomputed with this section)
+# text:
+#   segmenter_ckpt: /path/t5_segmenter.pt      # text/train_segmenter.py output
+#   hf_cache_dir: /path/hf_cache               # where flan-t5-base lives
 
 # ---------------------------------------------------------------- training
 train:
@@ -47,6 +70,8 @@ train:
   max_steps: 25000
   save_every: 1000
   state_dropout: 0.2                         # zero the whole state token (forces visual grounding)
+  use_language: false                        # +1 whole-sentence T5 token in CondFuse (needs text: section;
+                                             # changes cond_len — old checkpoints stay loadable with false)
   det_xyz_dropout: 0.1                       # zero the object 3D centre channel per sample
   attn_dropout: 0.1                          # transformer attention dropout (training only)
   num_workers: 8

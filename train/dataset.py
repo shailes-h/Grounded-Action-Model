@@ -45,6 +45,8 @@ class CacheDataset(Dataset):
             "pcd_pts": torch.from_numpy(ep["pcd_pts"][t].astype(np.float32)),
             "pcd_mask": torch.from_numpy(ep["pcd_mask"][t]),
             "state": torch.from_numpy(np.concatenate(hist).astype(np.float32)),
+            "lang": torch.from_numpy(np.asarray(ep["lang"], np.float32)) if "lang" in ep
+                    else torch.zeros(768),
         }
 
     def __getitem__(self, i: int):

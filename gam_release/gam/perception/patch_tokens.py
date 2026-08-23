@@ -2,7 +2,7 @@
 
 One forward of WildDet3D (SAM3 detector + LingBot RGB-D depth backend, metric depth
 injected) per object click gives
-    * the backbone's 49x49x1024 RGB-D feature map  -> 3x3 average pooled to a 16x16 grid,
+    * the backbone's 49x49x1024 RGB-D feature map  -> average pooled to a grid x grid map,
     * a 2D box and a 3D oriented box for the clicked object.
 Cells outside (object boxes U robot-arm mask) are zeroed ("masked patch tokens", 256x1024).
 """
@@ -58,10 +58,16 @@ class PatchTokenExtractor:
             "pixel" blackens image pixels outside the mask before the backbone.
         grid: patch-token grid size (grid x grid tokens; 16 or 24 are sensible; must match
             the policy checkpoint's `encoder.n_patch = grid**2`).
+        bf16: run the whole frame under torch.autocast(bfloat16). ~40% faster; 2D/3D boxes
+            move < 1px / 3e-3. Set False to reproduce fp32 caches bit-for-bit.
+        cell_min_overlap: a grid cell is kept only if an object 2D box covers at least this
+            fraction of the cell's area (pixel-exact). 0 falls back to "any cell the box
+            touches" with no expansion. The arm silhouette always uses the >10% rule.
     """
 
     def __init__(self, checkpoint: str, device: str = "cuda", channel_swap: bool = False,
-                 mask_level: str = "feature", grid: int = 16):
+                 mask_level: str = "feature", grid: int = 24, bf16: bool = True,
+                 cell_min_overlap: float = 0.30):
         from wilddet3d.inference import build_model
         assert mask_level in ("feature", "pixel")
         assert 1 <= int(grid) <= FEAT
@@ -69,6 +75,8 @@ class PatchTokenExtractor:
         self.dev = device
         self.channel_swap = bool(channel_swap)
         self.mask_level = mask_level
+        self.bf16 = bool(bf16)                       # autocast bf16 (~40% faster; boxes within ~1px of fp32)
+        self.cell_min_overlap = float(cell_min_overlap)  # keep a cell iff box covers >= this fraction of it
         self.pred = build_model(checkpoint=checkpoint, score_threshold=0.0, nms=False,
                                 iou_threshold=0.6, skip_pretrained=True).to(device).eval()
         # build_model() only builds the structure: load the weights explicitly and verify.
@@ -113,8 +121,18 @@ class PatchTokenExtractor:
                  clicks_px: List, arm_mask: Optional[np.ndarray] = None,
                  extra_boxes_px: Optional[List] = None) -> PatchResult:
         """rgb (H,W,3) uint8 RGB; depth_m (H,W) metres; K (3,3); E (3,4) world->cam;
-        clicks_px [(u,v), ...] one per object; arm_mask optional (H,W) bool;
-        extra_boxes_px optional extra pixel boxes to keep in the mask."""
+        clicks_px [(u,v), ...] one per object; arm_mask optional (H,W) bool — or a
+        concurrent.futures.Future resolving to one: with mask_level="feature" the mask is
+        only consumed after the WildDet3D forwards, so a silhouette rendered on a worker
+        thread overlaps with them for free; extra_boxes_px optional extra pixel boxes."""
+        if hasattr(arm_mask, "result") and self.mask_level == "pixel":
+            arm_mask = arm_mask.result()          # pixel blackening needs it up front
+        if self.bf16 and torch.cuda.is_available():
+            with torch.autocast("cuda", torch.bfloat16):
+                return self._forward(rgb, depth_m, K, E, clicks_px, arm_mask, extra_boxes_px)
+        return self._forward(rgb, depth_m, K, E, clicks_px, arm_mask, extra_boxes_px)
+
+    def _forward(self, rgb, depth_m, K, E, clicks_px, arm_mask=None, extra_boxes_px=None):
         H0, W0 = rgb.shape[:2]
         E = np.asarray(E, np.float64).reshape(3, 4); K = np.asarray(K, np.float64)
         sx, sy = INPUT / W0, INPUT / H0
@@ -136,24 +154,27 @@ class PatchTokenExtractor:
         dgt = torch.from_numpy(cv2.resize(np.asarray(depth_m, np.float32), (INPUT, INPUT),
                                           interpolation=cv2.INTER_NEAREST)).to(self.dev)[None, None]
         dets: List[Detection] = []
-        for (u, v) in clicks_px:
-            self._g.pop("hid", None)
-            self._dgt = dgt
-            out = self.pred(images=x, intrinsics=Ks[None], input_hw=[(INPUT, INPUT)],
-                            original_hw=[(INPUT, INPUT)], padding=[(0, 0, 0, 0)],
-                            input_points=[[(float(u) * sx, float(v) * sy, 1)]],
-                            prompt_text="visual", depth_gt=dgt)
-            self._dgt = None
-            b2, b3, sc = out[0][0], out[1][0], out[2][0]
+        N = len(clicks_px)
+        self._g.pop("hid", None)
+        self._dgt = dgt.expand(N, -1, -1, -1) if N > 1 else dgt
+        out = self.pred(images=x.expand(N, -1, -1, -1) if N > 1 else x,
+                        intrinsics=Ks[None].expand(N, -1, -1) if N > 1 else Ks[None],
+                        input_hw=[(INPUT, INPUT)] * N, original_hw=[(INPUT, INPUT)] * N,
+                        padding=[(0, 0, 0, 0)] * N,
+                        input_points=[[(float(u) * sx, float(v) * sy, 1)] for (u, v) in clicks_px],
+                        prompt_text="visual", depth_gt=self._dgt)
+        self._dgt = None
+        hidB = self._g.get("hid")
+        for i in range(N):
+            b2, b3, sc = out[0][i], out[1][i], out[2][i]
             if not (torch.is_tensor(sc) and sc.numel()):
                 dets.append(Detection(box2d=np.zeros(4, np.float32)))
                 continue
             j = int(sc.argmax())
             box2d = b2[j].float().cpu().numpy() / INPUT * [W0, H0, W0, H0]
             d = Detection(box2d=box2d.astype(np.float32), score=float(sc[j]))
-            hid = self._g.get("hid")
-            if hid is not None and hid.shape[1] > j:
-                d.hidden = hid[0, j].float().cpu().numpy()
+            if hidB is not None and hidB.shape[0] > i and hidB.shape[1] > j:
+                d.hidden = hidB[i, j].float().cpu().numpy()
             if torch.is_tensor(b3) and b3.numel():
                 bv = b3[j].float().cpu().numpy()
                 c_cam, whl, quat = bv[:3], bv[3:6], bv[6:10]
@@ -175,9 +196,21 @@ class PatchTokenExtractor:
         m16 = np.zeros((G, G), bool)
         boxes = [d.box2d for d in dets if d.box2d[2] > d.box2d[0]] + list(extra_boxes_px or [])
         for (x0, y0, x1, y1) in boxes:
-            c0, r0 = int(x0) * G // W0, int(y0) * G // H0
-            c1, r1 = -(-int(x1) * G // W0), -(-int(y1) * G // H0)
-            m16[max(r0 - 1, 0):min(r1 + 2, G), max(c0 - 1, 0):min(c1 + 2, G)] = True
+            x0, y0 = max(int(x0), 0), max(int(y0), 0)
+            x1, y1 = min(int(x1), W0 - 1), min(int(y1), H0 - 1)
+            if not (x1 > x0 and y1 > y0):
+                continue
+            if self.cell_min_overlap > 0:
+                # pixel-exact fraction of each cell covered by the box; keep iff >= threshold
+                bx = np.zeros((H0, W0), np.float32); bx[y0:y1 + 1, x0:x1 + 1] = 1.0
+                frac = cv2.resize(bx, (G, G), interpolation=cv2.INTER_AREA)
+                m16 |= frac >= self.cell_min_overlap
+            else:
+                c0, r0 = x0 * G // W0, y0 * G // H0
+                c1, r1 = -(-x1 * G // W0), -(-y1 * G // H0)
+                m16[max(r0, 0):min(r1 + 1, G), max(c0, 0):min(c1 + 1, G)] = True
+        if hasattr(arm_mask, "result"):
+            arm_mask = arm_mask.result()          # rendered concurrently with the forwards above
         if arm_mask is not None:
             m16 |= cv2.resize(arm_mask.astype(np.float32), (G, G),
                               interpolation=cv2.INTER_AREA) > 0.10

@@ -40,8 +40,14 @@ class YamModel:
         self.geom_src = self.cfg["perception"].get("geometry_source", "box2d_depth")
         self.ext = PatchTokenExtractor(self.cfg["perception"]["wilddet_ckpt"],
                                        channel_swap=self.policy.image_channel_swap,
-                                       grid=int(round(self.policy.encoder.n_patch ** 0.5)))
+                                       grid=int(round(self.policy.encoder.n_patch ** 0.5)),
+                                       bf16=bool(self.cfg["perception"].get("bf16", True)),
+                                       cell_min_overlap=float(self.cfg["perception"].get("cell_min_overlap", 0.30)))
         self.arm_fn = build_arm_mask_fn(self.cfg)
+        # the URDF silhouette only needs proprioception -> render it on a worker thread
+        # while WildDet3D runs; ~all of its cost disappears from the critical path
+        from concurrent.futures import ThreadPoolExecutor
+        self._arm_pool = ThreadPoolExecutor(max_workers=1) if self.arm_fn is not None else None
         self.state_hist = int(self.policy.meta.get("state_hist", 2))
         self.gen = torch.Generator(device="cuda").manual_seed(0)
         self.reset()
@@ -49,6 +55,8 @@ class YamModel:
               flush=True)
 
     def reset(self):
+        self._lang_px = None
+        self._lang_emb = None
         self.hist = []
         self.t = 0
         self._seam = None
@@ -70,15 +78,28 @@ class YamModel:
         q = np.asarray(obs["joint_action"]["vector"], np.float32).reshape(-1)
         if not self.hist:
             self.hist = [q] * self.state_hist
-        gt = obs.get("object_gt", {})
         clicks, valid = [], []
-        for i, nm in enumerate(self.slots):
-            o = gt.get(nm)
-            uv = project(np.asarray(o["p"], np.float64), K, E) if o is not None else None
-            if uv is not None and 0 <= uv[0] < W and 0 <= uv[1] < H:
-                clicks.append(tuple(uv)); valid.append(i)
-        arm = self.arm_fn(q, K, E, H, W) if self.arm_fn is not None else None
-        pr = self.ext(rgb, dep, K, E, clicks, arm_mask=arm)
+        if self.cfg["data"]["clicks"]["source"] == "language":
+            # text module -> grounding language interface, once per episode (frame-0 clicks)
+            if self._lang_px is None:
+                from text.language_clicks import clicks_from_language
+                self._lang_px, queries = clicks_from_language(
+                    self.cfg, rgb, obs.get("instruction", "") or getattr(self, "instruction", ""))
+                print(f"[yam] language clicks: {dict(zip(self.slots, queries))}", flush=True)
+            for i in range(len(self.slots)):
+                uv = self._lang_px[i]
+                if np.isfinite(uv).all() and 0 <= uv[0] < W and 0 <= uv[1] < H:
+                    clicks.append((float(uv[0]), float(uv[1]))); valid.append(i)
+        else:
+            gt = obs.get("object_gt", {})
+            for i, nm in enumerate(self.slots):
+                o = gt.get(nm)
+                uv = project(np.asarray(o["p"], np.float64), K, E) if o is not None else None
+                if uv is not None and 0 <= uv[0] < W and 0 <= uv[1] < H:
+                    clicks.append(tuple(uv)); valid.append(i)
+        arm_fut = (self._arm_pool.submit(self.arm_fn, q, K, E, H, W)
+                   if self.arm_fn is not None else None)
+        pr = self.ext(rgb, dep, K, E, clicks, arm_mask=arm_fut)  # Future: resolved after the forwards
         objs = {}
         for j, i in enumerate(valid):
             obj = geometry_from_detection(pr.detections[j], dep, K, E, self.geom_src)
@@ -87,6 +108,14 @@ class YamModel:
         g = build_slot_obs(depth_to_world(dep, K, E), objs, self.slots, self.n_pts,
                            E=E, K=K, seed=self.t)
         dev = "cuda"
+        if getattr(self.policy.encoder, "use_language", False):
+            if self._lang_emb is None:              # one T5 pass per episode
+                from text.language_clicks import sentence_embedding
+                self._lang_emb = sentence_embedding(
+                    self.cfg, obs.get("instruction", "") or getattr(self, "instruction", ""))
+            lang_t = torch.from_numpy(self._lang_emb)[None].to(dev)
+        else:
+            lang_t = None
         o = {"patch_tokens": pr.patches[None].to(dev),
              "box2d": torch.from_numpy(g["box2d"])[None].to(dev),
              "xyz": torch.from_numpy(g["xyz"])[None].to(dev),
@@ -94,6 +123,8 @@ class YamModel:
              "pcd_pts": torch.from_numpy(g["pcd_pts"])[None].to(dev),
              "pcd_mask": torch.from_numpy(g["pcd_mask"])[None].to(dev),
              "state": torch.from_numpy(np.concatenate(self.hist))[None].to(dev)}
+        if lang_t is not None:
+            o["lang"] = lang_t
         self.t += 1
         return self.policy.predict_action(o, generator=self.gen)[0].float().cpu().numpy()
 
