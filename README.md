@@ -47,10 +47,10 @@ Copy `configs/example.yaml` and point the `data:` keys at your HDF5 layout. Requ
 * **head camera**: RGB (`(T,H,W,3)` uint8 or JPEG bytes) + **aligned metric depth** +
   intrinsics + base→camera extrinsics (or the 4×4 camera pose, set `extrinsic_is_cam2base`).
   All 3D the policy sees lives in the robot base frame — calibration accuracy matters.
-  **Record at the highest resolution you can** (≥1280×720; the demo uses 1920×1080):
-  clicks, 2D boxes, the ≥30% cell-overlap rule and the depth back-projection are all
-  pixel-precise, and low-resolution frames directly loosen boxes, masks and point clouds.
-  The detector resizes internally, so higher input resolution costs precompute I/O only.
+  **Record at 1280×720 where possible**: clicks, 2D boxes, the ≥30% cell-overlap rule
+  and the depth back-projection are all pixel-precise, and low-resolution frames directly
+  loosen boxes, masks and point clouds. The detector resizes internally, so resolution
+  costs precompute I/O only.
 * **state / action**: `(T, 14)` for two 6-DoF arms + grippers
   (`[arm_L(6), grip_L, arm_R(6), grip_R]`), absolute joint targets. Other layouts work —
   dims are read from the data — but keep state and action in the same layout.
