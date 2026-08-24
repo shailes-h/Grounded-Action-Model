@@ -22,7 +22,9 @@ raw episodes (HDF5)                       cache (.npz / episode)                
 | `precompute/` | `precompute.py` (episodes → cache), `verify.py` (overlay video — **watch it before training**) |
 | `train/` | `dataset.py`, `train.py` (flow matching, EMA, release-format checkpoints) |
 | `eval/` | `eval_offline.py` (open-loop MAE + trajectory plots), `deploy_policy.py` (closed-loop contract) |
-| `scripts/` | thin bash wrappers |
+| `labeling/` | `annotator.py` — pick/place click web UI for data without ground truth |
+| `text/` | T5 object-word segmenter trainer + language→clicks bridge (optional) |
+| `scripts/` | thin bash wrappers, incl. `demo_sim.sh` (full sim walkthrough) |
 
 ## 0. Install
 
@@ -45,17 +47,32 @@ Copy `configs/example.yaml` and point the `data:` keys at your HDF5 layout. Requ
 * **head camera**: RGB (`(T,H,W,3)` uint8 or JPEG bytes) + **aligned metric depth** +
   intrinsics + base→camera extrinsics (or the 4×4 camera pose, set `extrinsic_is_cam2base`).
   All 3D the policy sees lives in the robot base frame — calibration accuracy matters.
+  **Record at the highest resolution you can** (≥1280×720; the demo uses 1920×1080):
+  clicks, 2D boxes, the ≥30% cell-overlap rule and the depth back-projection are all
+  pixel-precise, and low-resolution frames directly loosen boxes, masks and point clouds.
+  The detector resizes internally, so higher input resolution costs precompute I/O only.
 * **state / action**: `(T, 14)` for two 6-DoF arms + grippers
   (`[arm_L(6), grip_L, arm_R(6), grip_R]`), absolute joint targets. Other layouts work —
   dims are read from the data — but keep state and action in the same layout.
-* **one pixel click per object slot** (`data.slots`, manipulated object first). Two sources:
-  `project_centers` (you log 3D object centres, e.g. in sim — projected every frame) or
-  `dataset` (recorded clicks: `(S,2)` frame-0, held constant, or `(T,S,2)` per frame).
+* **one pixel click per object slot** (`data.slots`, manipulated object first). Four sources:
+  `project_centers` (you log 3D object centres, e.g. in sim — projected every frame),
+  `dataset` (recorded clicks: `(S,2)` frame-0, held constant, or `(T,S,2)` per frame),
+  `annotations` (hand-marked with `labeling/annotator.py` — see below), or
+  `language` (instruction → T5 segmenter → pointing service — see the Text section).
 * **robot section**: URDF + the joint-name order of your state vector. The robot silhouette
   is projected into every frame and kept in the patch mask — the policy is trained *with*
   it, so evaluation must provide it too (`deploy_policy` does, from the same config).
 
-## 2. Precompute
+## 2. Label clicks (only if you have neither sim ground truth nor recorded clicks)
+
+```bash
+python labeling/annotator.py --config configs/my_task.yaml    # -> http://127.0.0.1:8870
+```
+
+Two marks only — **1 = pick** (green), **2 = place** (orange). Details in the Labeling
+section below; then set `data.clicks: {source: annotations, annotations_dir: ...}`.
+
+## 3. Precompute
 
 ```bash
 python precompute/precompute.py --config configs/my_task.yaml
@@ -78,7 +95,27 @@ robot visible inside the kept area. Cost ≈ 0.5 s × frames × slots on one GPU
 Cache contents per episode: `patches (T,256,1024) fp16`, `box2d/xyz/boxgeo`,
 `pcd_pts (T,S,512,3)`, `pcd_mask`, `state`, `action`, `clicks`.
 
-## 3. Train
+## 4. Visual checks — do these BEFORE training
+
+```bash
+# still images straight from the cache (no GPU): raw frame + clicks | kept cells + boxes
+python precompute/viz_cache.py --config configs/my_task.yaml --episode episode_0000000
+# full overlay video (H.264, re-runs perception frame by frame)
+python precompute/verify.py   --config configs/my_task.yaml --episode episode_0000000
+```
+
+What "correct" looks like:
+
+* red 2D boxes hug each object (not the whole table, not empty air);
+* the kept (bright) cells cover exactly objects + robot silhouette — big bright background
+  areas mean the mask rule or the boxes are wrong;
+* green clicks sit on the right objects in the left panel;
+* in the video, boxes track the objects through the whole manipulation.
+
+Every geometry bug you can see here caps imitation quality later — the Troubleshooting
+table maps each visible symptom to the config knob that fixes it.
+
+## 5. Train
 
 ```bash
 python train/train.py --config configs/my_task.yaml
@@ -95,7 +132,7 @@ python train/train.py --config configs/my_task.yaml
   (~4 h). `latest.pt` is release-format: loadable by `GAMPolicy.from_checkpoint`, the GAM
   repo's `smoke_test.py`, and everything under `eval/`.
 
-## 4. Evaluate
+## 6. Evaluate
 
 Offline (no simulator/robot; uses the `data.val_episodes` held-out tail):
 
@@ -115,6 +152,35 @@ as precompute, predicts 16 steps and executes 15 with seam smoothing. For a real
 the GAM repository's `gam/deploy/` (Camera/Robot adapters + `run_real.py`) consumes the
 same checkpoints.
 
+## Demo: end-to-end in sim
+
+`configs/demo_sim.yaml` is a complete worked example on simulator data (RoboTwin battery
+task: two batteries + a slot, dual-arm ALOHA): JPEG head-cam RGB + mm depth + per-frame
+intrinsics/extrinsics, clicks projected from logged 3D object centres
+(`project_centers`), URDF silhouette with normalized-gripper mapping
+(`joint_affine`/`joint_mirror`). Adapt its `data:` paths to your sim dump and run:
+
+```bash
+bash scripts/demo_sim.sh configs/demo_sim.yaml 3 800
+#                         config              ^eps ^train steps
+```
+
+The script walks the whole chain and stops you at the right places:
+
+1. **precompute** the first 3 episodes (prints `slots-found S/S` per frame — anything
+   below S/S means clicks or calibration are off);
+2. **visual checks** — writes `demo_out/run/viz/<ep>_f*.png` and `<ep>.mp4`;
+   **open them** and compare against the checklist in step 4 above;
+3. **train** 800 steps (~4 min on one modern GPU) — loss should fall from ~1.2 to ≲0.1
+   on this data; a plateau ≫0.3 almost always traces back to a geometry bug you can see
+   in step 2;
+4. **offline eval** on the held-out episode — per-dim MAE + recorded-vs-predicted joint
+   plots in `demo_out/run/eval_offline/`; arm curves should follow the recorded shape.
+
+Reference numbers from this demo (3 episodes, 800 steps): train loss 1.19 → 0.089,
+open-loop MAE ≈ 0.1–0.24 per joint dim. Scale up (all episodes, 25 k steps) with the
+same config once the demo chain looks right.
+
 ## Conventions that must match between data, training and deployment
 
 1. base-frame extrinsics (OpenCV camera: +z forward, +y down), metric depth aligned to RGB;
@@ -130,6 +196,8 @@ same checkpoints.
 | --- | --- |
 | red 3D boxes floating off the objects in `verify.py` | extrinsics direction (`extrinsic_is_cam2base`), depth unit, depth-RGB alignment |
 | `slots-found 0/S` during precompute | clicks outside the image (projection frame wrong) or `clicks.source` misconfigured |
+| large background areas kept in `viz_cache.py` | boxes too big (wrong WildDet3D ckpt?) or `cell_min_overlap` too low |
+| gripper fingers missing from the silhouette | `joint_affine` (normalized→native units) / `joint_mirror` for the second finger |
 | robot not dimmed-in in `verify.py` | URDF `joint_names` order vs state vector, `T_base_root`, `link_filter` too narrow |
 | loss plateaus high | check `verify.py` first — geometry bugs cap imitation quality |
 | eval MAE fine but robot fails closed-loop | harness obs conventions differ from data (depth unit, extrinsics, state layout) |

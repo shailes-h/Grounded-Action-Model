@@ -1,0 +1,1 @@
+{"slots": ["battery1", "battery2", "battery_slot"], "n_points": 512, "patch_grid": 24, "geometry_source": "box2d_depth"}

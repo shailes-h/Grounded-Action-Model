@@ -70,8 +70,8 @@ perception:
       fl_joint8: fl_joint7
       fr_joint8: fr_joint7
 train:
-  cache_dir: /gscratch/scrubbed/gehao/yam/_selfcheck/cache
-  out_dir: /gscratch/scrubbed/gehao/yam/_selfcheck/run
+  cache_dir: demo_out/cache
+  out_dir: demo_out/run
   horizon: 16
   batch_size: 16
   n_action_steps: 16
