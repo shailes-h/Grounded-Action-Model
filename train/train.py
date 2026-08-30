@@ -91,6 +91,25 @@ def ema_decay(step, power=0.75, max_value=0.9999):
     return min(max_value, 1 - (1 + step) ** -power)
 
 
+class _LossModule(torch.nn.Module):
+    """Wraps encoder+trunk+flow-matching loss in one forward so DDP sees a single module."""
+
+    def __init__(self, policy):
+        super().__init__()
+        self.policy = policy
+
+    def forward(self, obs, act):
+        policy = self.policy
+        B = act.shape[0]
+        cond = policy.encoder(policy.normalizer.normalize(obs))
+        x1 = policy.normalizer._affine("action", act, True)
+        tt = 0.999 * torch.distributions.Beta(1.0, 1.5).sample((B,)).to(act.device)
+        x0 = torch.randn_like(x1)
+        x_t = (1 - tt.view(-1, 1, 1)) * x0 + tt.view(-1, 1, 1) * x1
+        v = policy.model(x_t, tt, torch.zeros_like(tt), cond)
+        return F.mse_loss(v.float(), (x1 - x0).float())
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
@@ -98,8 +117,16 @@ def main():
     args = ap.parse_args()
     cfg = load_config(args.config)
     t = cfg["train"]
-    torch.manual_seed(int(t.get("seed", 42)))
-    np.random.seed(int(t.get("seed", 42)))
+    # DDP: launched via torchrun (env RANK/WORLD_SIZE); batch_size is PER-RANK.
+    rank = int(os.environ.get("RANK", 0))
+    world = int(os.environ.get("WORLD_SIZE", 1))
+    if world > 1:
+        import torch.distributed as dist
+        local = int(os.environ.get("LOCAL_RANK", 0))
+        torch.cuda.set_device(local)
+        dist.init_process_group("nccl")
+    torch.manual_seed(int(t.get("seed", 42)) + rank)
+    np.random.seed(int(t.get("seed", 42)) + rank)
     out_dir = t["out_dir"]
     os.makedirs(out_dir, exist_ok=True)
 
@@ -109,16 +136,30 @@ def main():
     train_names = all_names[:-n_val] if n_val else all_names
     ds = CacheDataset(t["cache_dir"], train_names, horizon=int(t["horizon"]),
                       state_hist=int(t["state_hist"]))
-    print(f"[train] {len(ds.eps)} episodes / {len(ds)} windows "
-          f"(val held out: {all_names[len(train_names):]})", flush=True)
-    dl = DataLoader(ds, batch_size=int(t["batch_size"]), shuffle=True,
+    if rank == 0:
+        print(f"[train] {len(ds.eps)} episodes / {len(ds)} windows "
+              f"(val held out: {all_names[len(train_names):]}) world={world}", flush=True)
+    sampler = None
+    if world > 1:
+        from torch.utils.data.distributed import DistributedSampler
+        sampler = DistributedSampler(ds, num_replicas=world, rank=rank, shuffle=True,
+                                     seed=int(t.get("seed", 42)), drop_last=True)
+    dl = DataLoader(ds, batch_size=int(t["batch_size"]), shuffle=(sampler is None),
+                    sampler=sampler,
                     num_workers=int(t.get("num_workers", 8)), pin_memory=False, drop_last=True)
 
     policy, config = build_policy(cfg, ds)
     scale, offset = fit_limits_normalizer(ds.all_actions())
     policy.normalizer.add("action", scale, offset)
     policy = policy.cuda().train()
-    print(f"[train] params {sum(p.numel() for p in policy.parameters()) / 1e6:.1f}M", flush=True)
+    net = _LossModule(policy)
+    if world > 1:
+        net = torch.nn.parallel.DistributedDataParallel(
+            net, device_ids=[int(os.environ.get("LOCAL_RANK", 0))],
+            find_unused_parameters=True,   # null tokens are used data-dependently
+            gradient_as_bucket_view=True)
+    if rank == 0:
+        print(f"[train] params {sum(p.numel() for p in policy.parameters()) / 1e6:.1f}M", flush=True)
 
     max_steps = args.max_steps or int(t["max_steps"])
     warmup = int(t.get("warmup_steps", 1000))
@@ -127,11 +168,15 @@ def main():
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: s / max(warmup, 1) if s < warmup
         else 0.5 * (1 + math.cos(math.pi * (s - warmup) / max(max_steps - warmup, 1))))
-    ema = copy.deepcopy(policy).eval().requires_grad_(False)
+    # EMA on CPU (rank 0): frees ~1.2GB of VRAM; per-step D2H copy of params (~60ms)
+    ema = copy.deepcopy(policy).cpu().eval().requires_grad_(False) if rank == 0 else None
     xyz_drop = float(t.get("det_xyz_dropout", 0.0))
 
-    step, t0, run_loss = 0, time.time(), 0.0
+    step, epoch, t0, run_loss = 0, 0, time.time(), 0.0
     while step < max_steps:
+        if sampler is not None:
+            sampler.set_epoch(epoch)
+        epoch += 1
         for batch in dl:
             obs = {k: v.cuda(non_blocking=True) for k, v in batch["obs"].items()}
             act = batch["action"].cuda(non_blocking=True)
@@ -140,32 +185,28 @@ def main():
                 keep = (torch.rand(B, 1, 1, device=act.device) >= xyz_drop).float()
                 obs["xyz"] = obs["xyz"] * keep
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                cond = policy.encoder(policy.normalizer.normalize(obs))
-                x1 = policy.normalizer._affine("action", act, True)
-                tt = 0.999 * torch.distributions.Beta(1.0, 1.5).sample((B,)).to(act.device)
-                x0 = torch.randn_like(x1)
-                x_t = (1 - tt.view(-1, 1, 1)) * x0 + tt.view(-1, 1, 1) * x1
-                v = policy.model(x_t, tt, torch.zeros_like(tt), cond)
-                loss = F.mse_loss(v.float(), (x1 - x0).float())
+                loss = net(obs, act)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
             sched.step()
             step += 1
-            # EMA
-            d = ema_decay(step)
-            with torch.no_grad():
-                for pe, p in zip(ema.parameters(), policy.parameters()):
-                    pe.mul_(d).add_(p.detach(), alpha=1 - d)
-                for be, b in zip(ema.buffers(), policy.buffers()):
-                    be.copy_(b)
+            # EMA (rank 0 only; DDP keeps replicas identical)
+            if ema is not None:
+                d = ema_decay(step)
+                with torch.no_grad():
+                    for pe, p in zip(ema.parameters(), policy.parameters()):
+                        pe.mul_(d).add_(p.detach().cpu(), alpha=1 - d)
+                    for be, b in zip(ema.buffers(), policy.buffers()):
+                        be.copy_(b.cpu())
             run_loss += loss.item()
-            if step % 50 == 0:
+            if step % 50 == 0 and rank == 0:
                 print(f"step {step}/{max_steps}  loss {run_loss / 50:.4f}  "
                       f"lr {sched.get_last_lr()[0]:.2e}  {(time.time() - t0) / step:.2f}s/it",
                       flush=True)
+            if step % 50 == 0:
                 run_loss = 0.0
-            if step % int(t.get("save_every", 1000)) == 0 or step == max_steps:
+            if rank == 0 and (step % int(t.get("save_every", 1000)) == 0 or step == max_steps):
                 ema.meta = policy.meta
                 ema.save_checkpoint(os.path.join(out_dir, "latest.pt"), config)
                 if step % (5 * int(t.get("save_every", 1000))) == 0:
@@ -173,7 +214,8 @@ def main():
                 print(f"[train] saved latest.pt @ step {step}", flush=True)
             if step >= max_steps:
                 break
-    print("TRAIN_DONE")
+    if rank == 0:
+        print("TRAIN_DONE")
 
 
 if __name__ == "__main__":

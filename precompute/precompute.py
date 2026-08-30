@@ -15,6 +15,7 @@ import os
 import sys
 import time
 
+import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -36,7 +37,20 @@ def build_arm_mask_fn(cfg):
     return m
 
 
-def geometry_from_detection(det, depth_m, K, E, source: str):
+def _depth_K(K, rgb_shape, depth_shape):
+    """RGB 内参 -> 深度分辨率内参 (深度常为 RGB 的 1/2 长宽; 像素中心约定).
+    返回 (KD, dscale). 分辨率相同则原样返回."""
+    if tuple(depth_shape[:2]) == tuple(rgb_shape[:2]):
+        return K, 1.0
+    sy = depth_shape[0] / float(rgb_shape[0]); sx = depth_shape[1] / float(rgb_shape[1])
+    KD = K.copy()
+    KD[0, 0] *= sx; KD[1, 1] *= sy
+    KD[0, 2] = (K[0, 2] + 0.5) * sx - 0.5
+    KD[1, 2] = (K[1, 2] + 0.5) * sy - 0.5
+    return KD, sx
+
+
+def geometry_from_detection(det, depth_m, K, E, source: str, z_band: float = 0.15):
     """WildDet3D detection -> object dict, by config `perception.geometry_source`:
     box2d_depth = depth backprojection inside the predicted 2D box (axis-aligned);
     box3d       = the predicted oriented 3D box. Falls back to the other source."""
@@ -45,7 +59,7 @@ def geometry_from_detection(det, depth_m, K, E, source: str):
     if source == "box3d" and det.center is not None:
         obj = {"p": det.center, "extents": det.extents, "R": det.R}
     if obj is None and det.box2d[2] > det.box2d[0]:
-        obj = object_from_box(det.box2d, depth_m, K, E)
+        obj = object_from_box(det.box2d, depth_m, K, E, z_band=z_band)
     if obj is None and det.center is not None:
         obj = {"p": det.center, "extents": det.extents, "R": det.R}
     return obj
@@ -65,6 +79,24 @@ def process_episode(ep, ext, arm_fn, cfg, out_path):
     pcd_pts = np.zeros((T, S, n_pts, 3), np.float16)
     pcd_mask = np.zeros((T, S, n_pts), bool)
     t0 = time.time()
+    # --- 传感器深度口径 (perception.sensor_depth: true, 0829 定稿) ---------------------
+    # 1. 检测器永远喂零深度 (纯单目, 与 wilddet 训练时的推理口径一致); 真实深度只参与点云几何.
+    # 2. 几何深度先清洗: 抠掉机器人剪影像素 + 桌面及以下 (真实深度锐利, 手指与被夹物体同深度、
+    #    桌面/背后容器都会被 object_from_box 的中值带圈进 OBB -> 框和点云膨胀).
+    # 3. cache 的 box2d 直接存检测框 (紧); OBB 只用于 xyz/boxgeo/pcd.
+    # 4. 深度分辨率可低于 RGB (常见 1/2): 几何用按实际形状缩放的内参 KD, 框坐标乘 dscale.
+    sensor_depth = bool(cfg["perception"].get("sensor_depth", False))
+    z_band = float(cfg["perception"].get("z_band", 0.15))
+    table_z = None
+    if sensor_depth:
+        from gam.perception.geometry import depth_to_world_grid
+        d0 = ep.depth_m(0)
+        K0 = ep.K[0].astype(np.float64)
+        KD0, ds0 = _depth_K(K0, ep.rgb(0).shape, d0.shape)
+        P0, ok0 = depth_to_world_grid(d0, KD0, ep.E[0].astype(np.float64))
+        hz, ez = np.histogram(P0[ok0][:, 2], bins=200, range=(-0.3, 1.0))
+        table_z = float(ez[hz.argmax()] + (ez[1] - ez[0]) / 2)
+        print(f"  sensor-depth mode: depth {d0.shape} scale {ds0:.3f}, table z={table_z:.4f} m", flush=True)
     for t in range(T):
         rgb = ep.rgb(t)
         dep = ep.depth_m(t)
@@ -74,16 +106,38 @@ def process_episode(ep, ext, arm_fn, cfg, out_path):
         cl = ep.clicks[t]
         valid = [i for i in range(S) if np.isfinite(cl[i]).all()
                  and 0 <= cl[i][0] < W and 0 <= cl[i][1] < H]
-        pr = ext(rgb, dep, K, E, [tuple(cl[i]) for i in valid], arm_mask=arm)
+        if sensor_depth:
+            KD, dscale = _depth_K(K, rgb.shape, dep.shape)
+            dep_geo = dep.copy()
+            if arm is not None:
+                am_s = cv2.resize(arm.astype(np.uint8), (dep.shape[1], dep.shape[0]),
+                                  interpolation=cv2.INTER_NEAREST).astype(bool)
+                dep_geo[am_s] = 0.0
+            from gam.perception.geometry import depth_to_world_grid
+            Pg, okg = depth_to_world_grid(dep_geo, KD, E)
+            dep_geo[okg & (Pg[..., 2] < table_z + 0.008)] = 0.0
+            det_depth = np.zeros((H, W), np.float32)          # 检测器: 零深度
+        else:
+            KD, dscale, dep_geo, det_depth = K, 1.0, dep, dep
+        pr = ext(rgb, det_depth, K, E, [tuple(cl[i]) for i in valid], arm_mask=arm)
         objs = {}
+        det_boxes = {}
         for j, i in enumerate(valid):
-            obj = geometry_from_detection(pr.detections[j], dep, K, E, geom_src)
+            det = pr.detections[j]
+            if sensor_depth and det.box2d[2] > det.box2d[0]:
+                import dataclasses as _dc
+                det = _dc.replace(det, box2d=det.box2d * dscale)
+            obj = geometry_from_detection(det, dep_geo, KD, E, geom_src, z_band=z_band)
             if obj is not None:
                 objs[cfg["data"]["slots"][i]] = obj
-        pcd = depth_to_world(dep, K, E)
+                det_boxes[i] = pr.detections[j].box2d.astype(np.float32)
+        pcd = depth_to_world(dep_geo, KD, E)
         g = build_slot_obs(pcd, objs, cfg["data"]["slots"], n_pts, E=E, K=K, seed=t)
         patches[t] = pr.patches.numpy().astype(np.float16)
         box2d[t], xyz[t], boxgeo[t] = g["box2d"], g["xyz"], g["boxgeo"]
+        if sensor_depth:
+            for i, b in det_boxes.items():                    # 2D 框 = 检测框 (紧), 非 OBB 反投影
+                box2d[t, i] = b
         pcd_pts[t] = g["pcd_pts"].astype(np.float16)
         pcd_mask[t] = g["pcd_mask"]
         if t % 25 == 0 or t == T - 1:

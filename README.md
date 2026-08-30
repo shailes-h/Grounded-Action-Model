@@ -34,6 +34,37 @@ Needs the GAM package (model + perception) and its vendored WildDet3D:
 conda create -n gam python=3.11 -y && conda activate gam
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -e /path/to/gam_release          # the GAM repository
+
+### Real sensor depth (recommended when your camera records aligned depth)
+
+Set these in your config's `perception:` block:
+
+```yaml
+perception:
+  sensor_depth: true      # real depth builds the point clouds; the detector always
+                          # receives ZERO depth (pure monocular, matching its training)
+  z_band: 0.06            # median-depth band (m) when cropping object points from the
+                          # 2D box; keep small for tabletop objects so containers/fingers
+                          # behind the object are excluded (default 0.15)
+```
+
+What `sensor_depth: true` changes (and why):
+
+1. **The detector never sees real depth.** WildDet3D runs monocular; real depth only
+   back-projects point clouds. Feeding sharp sensor depth into the detector shifts its
+   input distribution for no gain.
+2. **Geometry depth is cleaned before use**: robot-silhouette pixels are removed (with a
+   gripper holding an object, fingers sit at the same depth and would inflate the OBB),
+   and everything at/below the table plane (auto-estimated per episode from the depth
+   histogram) is dropped.
+3. **`box2d` in the cache is the raw detection box** (tight). The OBB re-projection is
+   only used for `xyz`/`boxgeo`/point clouds — with sharp depth it absorbs neighbouring
+   surfaces and grows.
+4. **Half-resolution depth is fine** (e.g. 640x360 vs 1280x720 RGB): intrinsics are
+   rescaled automatically with the pixel-center convention; do NOT upsample depth.
+
+Depth files must be aligned to the annotated color camera. Invalid pixels should be 0.
+
 pip install h5py pyyaml matplotlib
 ```
 
