@@ -50,6 +50,13 @@ def _depth_K(K, rgb_shape, depth_shape):
     return KD, sx
 
 
+def _obfb_kwargs(z_band):
+    """老版本 gam_release 的 object_from_box 没有 z_band 参数 -> 自动降级 (兼容垫片)."""
+    import inspect
+    from gam.perception.geometry import object_from_box
+    return {"z_band": z_band} if "z_band" in inspect.signature(object_from_box).parameters else {}
+
+
 def geometry_from_detection(det, depth_m, K, E, source: str, z_band: float = 0.15):
     """WildDet3D detection -> object dict, by config `perception.geometry_source`:
     box2d_depth = depth backprojection inside the predicted 2D box (axis-aligned);
@@ -59,7 +66,7 @@ def geometry_from_detection(det, depth_m, K, E, source: str, z_band: float = 0.1
     if source == "box3d" and det.center is not None:
         obj = {"p": det.center, "extents": det.extents, "R": det.R}
     if obj is None and det.box2d[2] > det.box2d[0]:
-        obj = object_from_box(det.box2d, depth_m, K, E, z_band=z_band)
+        obj = object_from_box(det.box2d, depth_m, K, E, **_obfb_kwargs(z_band))
     if obj is None and det.center is not None:
         obj = {"p": det.center, "extents": det.extents, "R": det.R}
     return obj
