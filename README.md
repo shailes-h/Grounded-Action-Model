@@ -34,7 +34,7 @@ Needs the GAM package (model + perception) and its vendored WildDet3D:
 conda create -n gam python=3.11 -y && conda activate gam
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -e /path/to/gam_release          # the GAM repository
-
+```
 ### Real sensor depth (recommended when your camera records aligned depth)
 
 Set these in your config's `perception:` block:
@@ -64,7 +64,7 @@ What `sensor_depth: true` changes (and why):
    rescaled automatically with the pixel-center convention; do NOT upsample depth.
 
 Depth files must be aligned to the annotated color camera. Invalid pixels should be 0.
-
+```bash
 pip install h5py pyyaml matplotlib
 ```
 
