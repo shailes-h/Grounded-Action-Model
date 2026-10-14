@@ -163,6 +163,9 @@ python scripts/inspect_pcd_alignment.py --config <cfg> --episode episode_0000000
 python scripts/tune_extrinsic_web.py --config <cfg> [--port 8871]   # browser, headless-friendly
 #  sliders nudge perception.robot.T_base_root until the URDF mesh (red) sits on the
 #  depth points of the arms (cyan); "Save" prints the matrix to paste into the config
+python scripts/export_calib_data.py --config <cfg> [--episode episode_0000000] [--out data/calib_data.json]
+#  one JSON (RGB, depth points in camera frame, URDF mesh verts, K, cam2base) -- the input the
+#  camera extrinsic was hand-aligned against in a browser tool (not in this repo)
 ```
 
 ## 2. Label clicks (only if you have neither sim ground truth nor recorded clicks)
