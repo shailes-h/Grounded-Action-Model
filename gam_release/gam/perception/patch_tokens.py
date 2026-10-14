@@ -37,6 +37,8 @@ class Detection:
     R: Optional[np.ndarray] = None       # (3,3) columns = axes (world)
     score: float = 0.0
     hidden: Optional[np.ndarray] = None  # (256,) detector query hidden state
+    center_cam: Optional[np.ndarray] = None  # (3,) camera frame center (raw WildDet3D)
+    R_cam: Optional[np.ndarray] = None       # (3,3) camera frame rotation (raw WildDet3D)
 
 
 @dataclass
@@ -82,10 +84,18 @@ class PatchTokenExtractor:
         # build_model() only builds the structure: load the weights explicitly and verify.
         ck = torch.load(checkpoint, map_location="cpu", weights_only=False, mmap=True)
         sd = ck.get("model") or ck
-        self.pred.wilddet3d.load_state_dict(sd, strict=False)
-        k = [k for k in sd if "bbox3d_head" in k and k.endswith("weight")][0]
-        a = float(sd[k].float().abs().sum()); b = float(self.pred.wilddet3d.state_dict()[k].float().abs().sum())
-        assert abs(a - b) < 1e-2, f"weight load failed for {k}"
+        # v1.1 checkpoints may prefix keys with "model." — strip for wilddet3d.load_state_dict
+        if any(k.startswith("model.") for k in sd):
+            sd_stripped = {k.removeprefix("model."): v for k, v in sd.items()}
+        else:
+            sd_stripped = sd
+        self.pred.wilddet3d.load_state_dict(sd_stripped, strict=False)
+        # verify a representative weight actually loaded (bbox3d_head or bbox_embed)
+        verify_keys = [k for k in sd_stripped if ("bbox3d_head" in k or "bbox_embed" in k) and k.endswith("weight")]
+        if verify_keys:
+            k = verify_keys[0]
+            a = float(sd_stripped[k].float().abs().sum()); b = float(self.pred.wilddet3d.state_dict()[k].float().abs().sum())
+            assert abs(a - b) < 1e-2, f"weight load failed for {k}"
         del ck, sd
         gb = [m for n, m in self.pred.named_modules() if n.endswith("geometry_backend")][0]
         head = [m for n, m in self.pred.named_modules() if type(m).__name__ == "Det3DHead"][0]
@@ -170,7 +180,15 @@ class PatchTokenExtractor:
             if not (torch.is_tensor(sc) and sc.numel()):
                 dets.append(Detection(box2d=np.zeros(4, np.float32)))
                 continue
-            j = int(sc.argmax())
+            # Prefer boxes that contain the click point; fall back to global argmax.
+            cu, cv = float(clicks_px[i][0]) * sx, float(clicks_px[i][1]) * sy
+            b2f = b2.float()
+            contains = (b2f[:, 0] <= cu) & (b2f[:, 2] >= cu) & (b2f[:, 1] <= cv) & (b2f[:, 3] >= cv)
+            if contains.any():
+                sc_masked = torch.where(contains, sc, torch.tensor(float('-inf'), device=sc.device))
+                j = int(sc_masked.argmax())
+            else:
+                j = int(sc.argmax())
             box2d = b2[j].float().cpu().numpy() / INPUT * [W0, H0, W0, H0]
             d = Detection(box2d=box2d.astype(np.float32), score=float(sc[j]))
             if hidB is not None and hidB.shape[0] > i and hidB.shape[1] > j:
@@ -179,6 +197,8 @@ class PatchTokenExtractor:
                 bv = b3[j].float().cpu().numpy()
                 c_cam, whl, quat = bv[:3], bv[3:6], bv[6:10]
                 Rc = _quat_to_R(quat)
+                d.center_cam = c_cam.astype(np.float32)
+                d.R_cam = Rc.astype(np.float32)
                 d.center = (E[:, :3].T @ (c_cam - E[:, 3])).astype(np.float32)
                 d.extents = whl.astype(np.float32)
                 d.R = (E[:, :3].T @ Rc).astype(np.float32)

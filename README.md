@@ -71,6 +71,18 @@ pip install h5py pyyaml matplotlib
 Weights: the WildDet3D checkpoint (`wilddet3d.pt`, same file the GAM release uses) — path
 goes into the config. Nothing else is downloaded.
 
+Checkpoints used on the real bi-YAM rig (both live under the git-ignored `gam_release/weights/`):
+
+| file | source | used by |
+| --- | --- | --- |
+| `wilddet3d_alldata_all_prompt_v1.0.pt` | public: `hf_hub_download(repo_id="allenai/WildDet3D", filename=..., local_dir="gam_release/weights")` | earlier runs |
+| `wilddet3d_v1.1/wilddet3d_v1.1_droid_finetuned.ckpt` | DROID-finetuned v1.1 (HF snapshot `5eb63fcffef32a2e27637c4850091ddce26ff79d`, sha256 `7e68fb2e4256667bd6942795a549793ae06c3f312ef2fd22db2e791e6189527b`) | PnP v5 (`configs/pnp_v5.yaml`) |
+
+The v1.1 checkpoint stores its weights under a `model.` prefix; `PatchTokenExtractor` strips
+it. With several detections per click, it keeps the highest-scoring box that **contains the
+click** (falls back to the global argmax only if none does) — otherwise a confident box on a
+neighbouring object steals the slot.
+
 ## 1. Describe your data (`configs/my_task.yaml`)
 
 Copy `configs/example.yaml` and point the `data:` keys at your HDF5 layout. Requirements:
