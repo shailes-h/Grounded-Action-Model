@@ -29,6 +29,10 @@ including what is not in git and where it came from, is in
 | `labeling/` | `annotator.py` — pick/place click web UI for data without ground truth |
 | `text/` | T5 object-word segmenter trainer + language→clicks bridge (optional) |
 | `scripts/` | thin bash wrappers, incl. `demo_sim.sh` (full sim walkthrough) |
+| `scripts/` (bi-YAM) | LeRobot→HDF5 converter, CoTracker click tracking, URDF/silhouette + alignment tools, robot policy server + client, `run_pnp_v5_*.sh` SLURM launchers |
+| `labeling/annotations/` | PnP v5 frame-0 hand clicks (102 episodes) |
+| `assets/robots/bi_yam/` | bimanual YAM URDF + meshes (mounts fitted to our rig) |
+| `configs/calib/`, `env/` | rig camera calibration, pip freeze of the env that ran PnP v5 |
 
 ## 0. Install
 
@@ -395,6 +399,12 @@ condition length, so it is a train-time choice — checkpoints trained without i
 unchanged.
 
 ## Changelog
+
+**2026-09 — real bi-YAM rig (PnP v5)**: LeRobot v3.0 converter with real depth and a fixed
+per-episode frame index; sequential click slots; CoTracker3 click tracking; WildDet3D v1.1
+(DROID) with click-containing box selection; fitted bi-YAM URDF + alignment tools; HTTP policy
+server with live click tracking. Trained (102 episodes, 12k steps) and run on the robot; see
+`REPRODUCE_PNP_V5.md`.
 
 **2026-08-22 — perception defaults refresh** (all on by default; each has an off switch)
 
