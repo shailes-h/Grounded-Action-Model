@@ -1,0 +1,28 @@
+{
+ "points": [
+  {
+   "label": "pick 1",
+   "frame": 0,
+   "point": [
+    964.5,
+    244.3
+   ]
+  },
+  {
+   "label": "pick 2",
+   "frame": 0,
+   "point": [
+    458.3,
+    502.6
+   ]
+  },
+  {
+   "label": "place",
+   "frame": 0,
+   "point": [
+    651,
+    474.7
+   ]
+  }
+ ]
+}

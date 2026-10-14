@@ -1,0 +1,82 @@
+# PnP v5 dataset (datasets_GAM/PnP_version5, LeRobot v3.0): 4 task variants of
+#   "Pick the <right top|right bottom> yellow mint and <left top|left bottom> blue mint in the white box."
+# 102 episodes @ 15 fps, 1280x720, bi_yam_follower, REAL sensor depth (D435 aligned-to-color, uint16 mm).
+# Calibration: intrinsics fx=907.90 fy=905.86 cx=643.41 cy=373.91 (visually tuned color camera),
+# extrinsic configs/calib/bi_yam_d435_cam2base.npy (cam2base).
+#
+# Pipeline (all DONE and verified, end-to-end guide: REPRODUCE_PNP_V5.md):
+#   1. convert:   scripts/convert_lerobot_to_hdf5.py (real depth + calib above) -> data/pnp_v5_hdf5
+#   2. clicks:    labeling/annotator.py, sequential mode -> labeling/annotations/ (committed)
+#   3. track:     scripts/precompute_cotracker_clicks.py -> clicks/cotracker in each HDF5
+#                 (runs with clicks.source: annotations; scripts/run_pnp_v5_*.sh handle that)
+#   4. precompute: precompute/precompute.py -> data/pnp_v5_cache
+#   5. train:     torchrun --nproc_per_node=2 train/train.py (scripts/run_pnp_v5_train.sh)
+#                 -> runs/pnp_v5/latest.pt, final loss 0.0032 @ 12000 steps
+#   6. serve:     scripts/host_gam_server.py --track-clicks (scripts/run_gam_v5_server.sh)
+
+data:
+  episodes_glob: data/pnp_v5_hdf5/episode_*.hdf5
+  rgb_key: vision/cam_head/colors
+  depth_key: vision/cam_head/depth
+  depth_unit: mm
+  intrinsic_key: vision/cam_head/intrinsic
+  extrinsic_key: vision/cam_head/extrinsic
+  extrinsic_is_cam2base: true
+  state_key: joint_state/vector
+  action_key: joint_action/vector
+  instruction_key: instruction
+  slots: [pick_1, pick_2, place_1]            # 2 picks then 1 place
+  slot_choices: ["pick 1", "pick 2", "place"]
+  clicks:
+    source: dataset                       # hand-click first, then CoTracker tracks
+    dataset_key: clicks/cotracker             # after CoTracker precompute
+    annotations_dir: labeling/annotations
+    sequential: true
+  val_episodes: 8                             # last 8 of 102 episodes held out for eval
+
+perception:
+  wilddet_ckpt: gam_release/weights/wilddet3d_v1.1/wilddet3d_v1.1_droid_finetuned.ckpt
+  image_channel_swap: false
+  patch_grid: 24
+  bf16: true
+  cell_min_overlap: 0.30
+  geometry_source: box2d_depth
+  n_points: 512
+  sensor_depth: true
+  robot:
+    urdf: assets/robots/bi_yam/bi_yam.urdf
+    joint_names: [left_joint1, left_joint2, left_joint3, left_joint4, left_joint5,
+                  left_joint6, left_joint7, right_joint1, right_joint2, right_joint3,
+                  right_joint4, right_joint5, right_joint6, right_joint7]
+    T_base_root: [[-0.07299034380856467, 0.9955689346093926, 0.0592866439548262, -0.0255],
+                  [-0.9967518517266172, -0.07079040359060601, -0.038398760904990205, -0.00968248070149461],
+                  [-0.034031688031407194, -0.06189681090490778, 0.9975021949898331, -0.0233891460389789],
+                  [0.0, 0.0, 0.0, 1.0]]
+    link_filter: [left_, right_]
+    max_faces: 1500
+    joint_affine: {left_joint7: [0.0, -0.04695], right_joint7: [0.0, -0.04695]}
+    joint_mirror: {left_joint8: left_joint7, right_joint8: right_joint7}
+
+train:
+  cache_dir: data/pnp_v5_cache
+  out_dir: runs/pnp_v5
+  horizon: 16
+  n_action_steps: 16
+  state_hist: 2
+  batch_size: 128                         # per-GPU; trained on 2 GPUs = 256 global
+  lr: 2.0e-4
+  weight_decay: 1.0e-3
+  warmup_steps: 1000
+  max_steps: 12000                        # 94 train eps = 35167 windows -> ~87 epochs at 256 global
+  save_every: 600                         # (train.py saved step_3000/6000/9000/12000 + latest)
+  state_dropout: 0.2
+  use_language: false
+  det_xyz_dropout: 0.1
+  attn_dropout: 0.1
+  num_workers: 2
+  seed: 42
+  n_emb: 576
+  n_layer: 12
+  n_head: 16
+  tokens_per_slot: 8
+  pcd_dim: 512

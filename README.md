@@ -13,6 +13,10 @@ raw episodes (HDF5)                       cache (.npz / episode)                
  + one pixel click per object                  state/action windows
 ```
 
+**Real bi-YAM rig (PnP v5, trained and served on the robot):** step-by-step rebuild,
+including what is not in git and where it came from, is in
+[`REPRODUCE_PNP_V5.md`](REPRODUCE_PNP_V5.md).
+
 ## Layout
 
 | folder | what |
