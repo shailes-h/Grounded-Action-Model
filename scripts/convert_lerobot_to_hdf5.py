@@ -3,16 +3,20 @@
 per-episode HDF5 layout `common/episodes.py` reads (see configs/example.yaml).
 
 What this DOES map from the source dataset (real data, no guessing):
-  * RGB frames        <- videos/<video_key>/chunk-*/file-*.mp4 (decoded with OpenCV)
+  * RGB frames        <- videos/<video_key>/chunk-*/file-*.mp4 (ffmpeg, seeking to just
+                         this episode's frame span of the shared video)
   * state / action    <- observation.state_joint_angles / action_joint_angles
                          (already `[arm_L(6), grip_L, arm_R(6), grip_R]`, 14-dim -> no
                          reordering needed)
   * instruction       <- meta/tasks.parquet, looked up by task_index
+  * depth             <- observation.images.top_depth (uint16 mm PNG bytes in the parquet)
+                         when the dataset records it (e.g. PnP_version5, D435
+                         aligned-to-color)
 
 What it CANNOT map, because the source dataset does not record it, and fills with
 placeholders instead (see the loud warning printed at the end):
-  * depth             -> constant plane at `--depth-default-m` (default 0.5 m) for every
-                         pixel. There is no real depth in this dataset.
+  * depth             -> ONLY if there is no `observation.images.top_depth` column:
+                         constant plane at `--depth-default-m` (default 0.5 m).
   * intrinsics        -> a guessed pinhole (fx=fy=0.7*W, cx=W/2, cy=H/2) unless you pass
                          --fx/--fy/--cx/--cy.
   * extrinsics        -> identity cam2base (i.e. camera frame == robot base frame) unless
@@ -30,8 +34,10 @@ any slots.
 
 Usage:
     python scripts/convert_lerobot_to_hdf5.py \\
-        --dataset-dir datasets_GAM/bolts \\
-        --out-dir data/bolts_hdf5
+        --dataset-dir datasets_GAM/PnP_version5 \\
+        --out-dir data/pnp_v5_hdf5 \\
+        --extrinsic-npy configs/calib/bi_yam_d435_cam2base.npy \\
+        --fx 907.90 --fy 905.86 --cx 643.41 --cy 373.91
 """
 from __future__ import annotations
 
@@ -69,24 +75,46 @@ def _probe_wh(video_path: str) -> tuple:
     return int(h), int(w)
 
 
-def _decode_video_frames(video_path: str, frame_indices: np.ndarray) -> np.ndarray:
-    """Decode ALL frames of an mp4 via ffmpeg (libdav1d for AV1; cv2 can't decode AV1 on
-    this box) -> select the given 0-based frame indices -> (N,H,W,3) uint8 RGB."""
+def _decode_video_frames(video_path: str, frame_indices: np.ndarray, fps: float) -> np.ndarray:
+    """Decode only the needed frame range from an mp4 using ffmpeg seek.
+    Memory-efficient: only holds frames for one episode (~400 frames, ~1GB).
+
+    Uses input-level seeking (-ss before -i) which is frame-accurate for the
+    contiguous ranges LeRobot episodes produce, then decodes exactly the span
+    from the first to the last requested frame.
+    """
+    idx = np.asarray(frame_indices, np.int64)
+    if idx.min() < 0:
+        raise RuntimeError(f"{video_path}: negative frame index {idx.min()}")
     H, W = _probe_wh(video_path)
     frame_bytes = H * W * 3
+    first, last = int(idx.min()), int(idx.max())
+    n_span = last - first + 1  # exact number of frames in the contiguous range
+
+    # -ss before -i = input-level seek (fast, keyframe-accurate for AV1)
+    # -frames:v = decode exactly n_span frames starting from the seek point
+    seek_time = first / fps
     proc = subprocess.run(
-        ["ffmpeg", "-v", "error", "-c:v", "libdav1d", "-i", video_path,
+        ["ffmpeg", "-v", "error",
+         "-ss", f"{seek_time:.6f}",
+         "-i", video_path,
+         "-frames:v", str(n_span),
          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
         capture_output=True, check=True)
     raw = proc.stdout
-    n_frames = len(raw) // frame_bytes
-    if n_frames == 0:
-        raise RuntimeError(f"{video_path}: ffmpeg decoded 0 frames")
-    all_frames = np.frombuffer(raw, np.uint8, count=n_frames * frame_bytes).reshape(n_frames, H, W, 3)
-    idx = np.asarray(frame_indices, np.int64)
-    if idx.max() >= n_frames:
-        raise RuntimeError(f"{video_path}: requested frame {idx.max()} but only {n_frames} decoded")
-    return all_frames[idx]
+    n_decoded = len(raw) // frame_bytes
+    if n_decoded == 0:
+        raise RuntimeError(f"{video_path}: ffmpeg decoded 0 frames from seek={seek_time:.3f}")
+    buf = np.frombuffer(raw, np.uint8, count=n_decoded * frame_bytes).reshape(n_decoded, H, W, 3)
+
+    # Map requested indices into the decoded span
+    local_indices = idx - first
+    if local_indices.max() >= n_decoded:
+        raise RuntimeError(f"{video_path}: needed frame offset {local_indices.max()} "
+                           f"but only decoded {n_decoded} (seek={seek_time:.3f}, span={n_span})")
+    result = buf[local_indices].copy()
+    del buf, raw
+    return result
 
 
 def convert_episode(dataset_dir: str, out_dir: str, ep_row, tasks: dict, video_key: str,
@@ -104,18 +132,42 @@ def convert_episode(dataset_dir: str, out_dir: str, ep_row, tasks: dict, video_k
     data_path = os.path.join(dataset_dir, "data", f"chunk-{data_chunk:03d}", f"file-{data_file:03d}.parquet")
     video_path = os.path.join(dataset_dir, "videos", video_key, f"chunk-{vid_chunk:03d}", f"file-{vid_file:03d}.mp4")
 
-    df = pd.read_parquet(data_path).iloc[row_from:row_to].reset_index(drop=True)
+    df = pd.read_parquet(data_path)
+    # Each parquet file may be one episode or contain multiple — filter by episode_index
+    if "episode_index" in df.columns:
+        df = df[df["episode_index"] == ep_idx].reset_index(drop=True)
     T = len(df)
-    assert T > 0, f"episode {ep_idx}: empty row range [{row_from}, {row_to})"
+    assert T > 0, f"episode {ep_idx}: no rows in {data_path}"
 
     state = np.stack(df["observation.state_joint_angles"].to_numpy()).astype(np.float32)
     action = np.stack(df["action_joint_angles"].to_numpy()).astype(np.float32)
     timestamps = df["timestamp"].to_numpy(np.float64)
-    frame_idx_in_video = np.round((timestamps - from_ts) * fps).astype(np.int64)
+    # `timestamp` is EPISODE-relative (resets to 0 at the start of every episode);
+    # `from_ts` is this episode's offset into the shared video -- ADD them to get the
+    # global video frame index. (Bug fixed: this used to subtract, which is only
+    # coincidentally correct for episode 0 where from_ts=0 -- every later episode got a
+    # negative index that silently wrapped around to the wrong end of the video.)
+    frame_idx_in_video = np.round((from_ts + timestamps) * fps).astype(np.int64)
 
-    rgb = _decode_video_frames(video_path, frame_idx_in_video)
+    rgb = _decode_video_frames(video_path, frame_idx_in_video, fps)
     H, W = rgb.shape[1:3]
-    depth_mm = np.full((T, H, W), depth_default_m * 1000.0, np.uint16)
+
+    # --- depth: real sensor PNG from parquet, or constant placeholder ---
+    depth_col = "observation.images.top_depth"
+    if depth_col in df.columns:
+        import io
+        from PIL import Image
+        depth_mm = np.zeros((T, H, W), np.uint16)
+        for t_i in range(T):
+            cell = df[depth_col].iloc[t_i]
+            png_bytes = cell["bytes"] if isinstance(cell, dict) else cell
+            img = Image.open(io.BytesIO(png_bytes))
+            arr = np.asarray(img, np.uint16)
+            if arr.ndim == 3:
+                arr = arr[:, :, 0]
+            depth_mm[t_i] = arr
+    else:
+        depth_mm = np.full((T, H, W), depth_default_m * 1000.0, np.uint16)
 
     task_index = int(df["task_index"].iloc[0])
     instruction = tasks.get(task_index, "")
@@ -134,7 +186,7 @@ def convert_episode(dataset_dir: str, out_dir: str, ep_row, tasks: dict, video_k
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dataset-dir", required=True, help="LeRobot dataset root, e.g. datasets_GAM/bolts")
+    ap.add_argument("--dataset-dir", required=True, help="LeRobot dataset root, e.g. datasets_GAM/PnP_version5")
     ap.add_argument("--out-dir", required=True, help="where to write episode_*.hdf5")
     ap.add_argument("--video-key", default=None, help="feature name of the video to use as head cam "
                                                         "(default: auto-detect the only video feature)")
@@ -182,10 +234,11 @@ def main():
         written.append(out_path)
 
     print(f"\n[convert] wrote {len(written)} episode(s) to {args.out_dir}")
-    print("[convert] WARNING: depth is a constant placeholder plane, intrinsics/extrinsics are "
-          "guessed/identity — 3D outputs (xyz, boxgeo, point clouds) from this data are NOT "
-          "physically meaningful. Supply real depth + calibration before training a checkpoint "
-          "you intend to deploy.")
+    print("[convert] WARNING: unless you passed --fx/--fy/--cx/--cy and --extrinsic-npy, "
+          "intrinsics/extrinsics are guessed/identity, and without a top_depth column depth is "
+          "a constant plane — 3D outputs (xyz, boxgeo, point clouds) are then NOT physically "
+          "meaningful. Supply real depth + calibration before training a checkpoint you intend "
+          "to deploy.")
     print("[convert] No clicks in the source data — before precompute, hand-click pick/place with:\n"
           f"    python labeling/annotator.py --config <your_config.yaml>   # episodes_glob -> {args.out_dir}/episode_*.hdf5")
 

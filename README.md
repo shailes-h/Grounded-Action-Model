@@ -94,6 +94,23 @@ Copy `configs/example.yaml` and point the `data:` keys at your HDF5 layout. Requ
   is projected into every frame and kept in the patch mask — the policy is trained *with*
   it, so evaluation must provide it too (`deploy_policy` does, from the same config).
 
+### From a LeRobot v3.0 recording (real bi-YAM rig)
+
+```bash
+python scripts/convert_lerobot_to_hdf5.py \
+    --dataset-dir datasets_GAM/PnP_version5 --out-dir data/pnp_v5_hdf5 \
+    --extrinsic-npy configs/calib/bi_yam_d435_cam2base.npy \
+    --fx 907.90 --fy 905.86 --cx 643.41 --cy 373.91
+```
+
+Writes one `episode_*.hdf5` per LeRobot episode: RGB (ffmpeg seeks to the episode's span
+of the shared mp4), real depth from `observation.images.top_depth` when present (uint16 mm
+PNGs, else a constant placeholder plane), `observation.state_joint_angles` /
+`action_joint_angles` as state/action. Video frame index = `(from_timestamp + timestamp) * fps`
+(LeRobot's `timestamp` is episode-relative). `configs/calib/bi_yam_d435_cam2base.npy` and the
+intrinsics above are the visually tuned D435 (aligned-to-color, 1280×720) calibration for our
+rig; re-tune with `scripts/tune_extrinsic_web.py` if the camera moved.
+
 ## 2. Label clicks (only if you have neither sim ground truth nor recorded clicks)
 
 ```bash
