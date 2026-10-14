@@ -132,6 +132,23 @@ python labeling/annotator.py --config configs/my_task.yaml    # -> http://127.0.
 Two marks only — **1 = pick** (green), **2 = place** (orange). Details in the Labeling
 section below; then set `data.clicks: {source: annotations, annotations_dir: ...}`.
 
+### 2b. Track the clicks through the episode (CoTracker3)
+
+Hand clicks are frame-0 only and held constant, so a picked-up object leaves its click
+behind. Track them instead:
+
+```bash
+python scripts/precompute_cotracker_clicks.py --config <cfg with clicks.source: annotations> \
+    [--episode episode_0000000] [--dump-viz out/cotracker_viz]
+```
+
+Seeds = the config's frame-0 clicks (`ep.clicks[0]`, so run it with `source: annotations`).
+It runs CoTracker3 **online** (`torch.hub facebookresearch/co-tracker`, needs internet the first
+time); the offline variant OOMs past a few hundred frames. It writes `clicks/cotracker` (T,S,2)
+and `clicks/cotracker_vis` (T,S) into each HDF5. Train on them with
+`data.clicks: {source: dataset, dataset_key: clicks/cotracker}`. Spot-check `--dump-viz` (red =
+CoTracker says occluded): tracks can drift when an object is fully hidden for a while.
+
 ## 3. Precompute
 
 ```bash
