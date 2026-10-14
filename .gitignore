@@ -5,3 +5,19 @@ _selfcheck/
 *.npz
 *.mp4
 _selfcheck_parity.py
+.venv
+*.egg-info/
+
+# local data / outputs (too big for git -- see REPRODUCE_PNP_V5.md for how to rebuild)
+data/
+datasets_GAM/
+runs/*
+demo_out/
+gam_release/weights/
+
+# generated robot assets; the bimanual YAM model itself is tracked
+assets/*
+!assets/robots/
+assets/robots/*
+!assets/robots/bi_yam/
+assets/robots/bi_yam/_tune_tmp.urdf
