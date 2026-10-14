@@ -398,6 +398,13 @@ computes it once per episode from the instruction. Off by default: enabling chan
 condition length, so it is a train-time choice — checkpoints trained without it load
 unchanged.
 
+## Work in progress (unverified)
+
+- `scripts/wilddet3d_prompt_playground.py` (+ `run_wilddet3d_playground.sh`): websocket page to
+  try WildDet3D **text** prompts on one RGB-D frame of a LeRobot dataset (port 8600, tunnel with
+  `ssh -L 8600:<node>:8600`). It is exploratory, for a possible text-prompted variant instead of
+  clicks. It loads and serves, but no results were recorded and nothing in the pipeline uses it.
+
 ## Changelog
 
 **2026-09 — real bi-YAM rig (PnP v5)**: LeRobot v3.0 converter with real depth and a fixed
