@@ -106,11 +106,16 @@ def load_episode(path: str, cfg: dict) -> Episode:
                           os.path.splitext(os.path.basename(path))[0] + ".json")
         if os.path.exists(ap):
             pts = json.load(open(ap)).get("points", [])
-            ordered = ([p_["point"] for p_ in pts if p_["role"] == "pick"]
-                       + [p_["point"] for p_ in pts if p_["role"] == "place"])
+            if d["clicks"].get("sequential", False):
+                # sequential mode: clicks map to slots in order, not grouped by pick/place
+                ordered = [p_["point"] for p_ in pts]
+            else:
+                ordered = ([p_["point"] for p_ in pts if p_["role"] == "pick"]
+                           + [p_["point"] for p_ in pts if p_["role"] == "place"])
             if len(ordered) != S:
                 print(f"[episodes] WARNING {os.path.basename(path)}: {len(ordered)} marks for "
-                      f"{S} slots (order = picks then places, must match data.slots)")
+                      f"{S} slots (order = {'sequential' if d['clicks'].get('sequential') else 'picks then places'}"
+                      f", must match data.slots)")
             for s_i in range(min(S, len(ordered))):
                 clicks[:, s_i] = np.asarray(ordered[s_i], np.float32)
         else:

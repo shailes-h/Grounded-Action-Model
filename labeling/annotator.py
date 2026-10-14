@@ -59,7 +59,18 @@ def api_episodes():
         n = os.path.splitext(os.path.basename(p))[0]
         done = os.path.exists(_ann_path(n))
         out.append({"name": n, "path": p, "done": done})
-    return jsonify({"episodes": out, "slots": CFG["data"]["slots"]})
+    slots = CFG["data"]["slots"]
+    sequential = bool(CFG["data"]["clicks"].get("sequential", False))
+    # how many of `slots` are picks vs places -- the loader concatenates
+    # [picks..., places...] in that order, so this is the split point. No field for it
+    # in the schema yet, so `data.clicks.n_picks` is optional; default splits evenly and
+    # is very possibly wrong for your task -- set n_picks explicitly if picks != places.
+    n_picks = CFG["data"]["clicks"].get("n_picks", len(slots) // 2)
+    slot_labels = CFG["data"].get("slot_labels", slots)
+    slot_choices = CFG["data"].get("slot_choices", [])
+    return jsonify({"episodes": out, "slots": slots, "n_picks": n_picks,
+                     "sequential": sequential, "slot_labels": slot_labels,
+                     "slot_choices": slot_choices})
 
 
 @app.get("/api/meta")
@@ -102,51 +113,167 @@ PAGE = """<!doctype html><meta charset=utf-8><title>yam annotator</title>
  button{background:#2a2f3a;color:#dde;border:1px solid #444;border-radius:6px;padding:5px 12px;margin:2px;cursor:pointer}
  button.on{background:#1d4d2a;border-color:#3a7}
  button.on2{background:#6b4a17;border-color:#c93}
+ button.on3{background:#2a4a6b;border-color:#39c}
+ button.on4{background:#6b2a4a;border-color:#c39}
  input[type=range]{width:640px;vertical-align:middle}
  #hint{color:#889;margin-top:6px}
 </style>
 <div id=side></div>
 <div id=main>
- <div>
-  <button id=bpick class=on onclick="setRole('pick')">1 · pick</button>
-  <button id=bplace onclick="setRole('place')">2 · place</button>
-  <span style="margin-left:18px">frame <input type=range id=sl min=0 max=0 value=0>
-  <span id=fr>0</span>/<span id=tt>0</span></span>
- </div>
+ <div id=toolbar></div>
  <canvas id=cv width=960 height=720></canvas>
- <div id=hint>1/2 choose the mark · click to drop it · click a mark to delete ·
-  a/d step frame · w/s ±10 · pick=green place=orange · autosaves</div>
+ <div id=hint></div>
 </div>
 <script>
 let eps=[],cur=-1,T=1,t=0,role='pick',pts=[],img=new Image(),W=0,H=0;
-const cv=document.getElementById('cv'),cx=cv.getContext('2d'),sl=document.getElementById('sl');
+let SLOTS=[],NPICKS=0,SEQ=false,CHOICES=[];
+let activeChoice='';  // sequential+choices: which choice button is active
+const cv=document.getElementById('cv'),cx=cv.getContext('2d');
+// distinct colours per choice (pick=greens, place=oranges, extra=blues)
+const CHOICE_COLORS={};
+const PALETTE=['#3c5','#e93','#39f','#e3c','#5c3','#c93','#3cf','#c3e'];
+
 async function boot(){
-  const r=await (await fetch('api/episodes')).json(); eps=r.episodes; side(); if(eps.length) show(0);
+  const r=await (await fetch('api/episodes')).json();
+  eps=r.episodes; SLOTS=r.slots; NPICKS=r.n_picks; SEQ=!!r.sequential;
+  CHOICES=r.slot_choices||[];
+  // assign a unique colour per choice
+  CHOICES.forEach((c,i)=>{ CHOICE_COLORS[c]=PALETTE[i%PALETTE.length]; });
+  buildToolbar();
+  side(); if(eps.length) show(0);
 }
+
+function buildToolbar(){
+  const tb=document.getElementById('toolbar');
+  const hint=document.getElementById('hint');
+  if(SEQ && CHOICES.length){
+    // Choice mode: one button per action-object combo (e.g. "pick can", "place bowl")
+    let html='';
+    CHOICES.forEach((c,i)=>{
+      html+=`<button id="bchoice${i}" onclick="setChoice('${c}',${i})">${i+1} · ${c}</button> `;
+    });
+    html+=`<span style="margin-left:18px">frame <input type=range id=sl min=0 max=0 value=0>
+      <span id=fr>0</span>/<span id=tt>0</span></span>`;
+    tb.innerHTML=html;
+    hint.innerHTML='<b>Workflow:</b> select what to mark (1-'+CHOICES.length+
+      ') → click on that object/location → it fills the next slot in sequence.<br>'+
+      'Click a mark to delete it · a/d step frame · w/s ±10 · autosaves';
+    setChoice(CHOICES[0],0);
+  } else if(SEQ){
+    // Sequential mode without choices (generic slots)
+    let html='';
+    SLOTS.forEach((s,i)=>{
+      html+=`<button id="bslot${i}" onclick="setSlotDirect(${i})">${i+1} · ${s}</button> `;
+    });
+    html+=`<span style="margin-left:18px">frame <input type=range id=sl min=0 max=0 value=0>
+      <span id=fr>0</span>/<span id=tt>0</span></span>`;
+    tb.innerHTML=html;
+    hint.textContent='1-'+SLOTS.length+' choose slot · click to place mark · click a mark to delete · a/d step frame · w/s ±10 · autosaves';
+    setSlotDirect(0);
+  } else {
+    // Original pick/place mode
+    tb.innerHTML=`<button id=bpick class=on onclick="setRole('pick')">1 · pick</button>
+      <button id=bplace onclick="setRole('place')">2 · place</button>
+      <span style="margin-left:18px">frame <input type=range id=sl min=0 max=0 value=0>
+      <span id=fr>0</span>/<span id=tt>0</span></span>`;
+    hint.textContent='1/2 choose the mark · click to drop it · click a mark to delete · a/d step frame · w/s ±10 · pick=green place=orange · autosaves';
+  }
+  document.getElementById('sl').oninput=function(){t=+this.value;draw();};
+}
+
+function setChoice(c,i){
+  activeChoice=c;
+  CHOICES.forEach((_,j)=>{
+    const b=document.getElementById('bchoice'+j);
+    if(b) b.className=(j===i)?(['on','on2','on3','on4'][j%4]):'';
+  });
+}
+function setSlotDirect(i){
+  activeChoice='__slot_'+i;
+  SLOTS.forEach((_,j)=>{
+    const b=document.getElementById('bslot'+j);
+    if(b) b.className=(j===i)?(['on','on2','on3','on4'][j%4]):'';
+  });
+}
+
+// --- original pick/place helpers (non-sequential) ---
+function slotFor(roleName,n){
+  const i=(roleName==='pick')?n:NPICKS+n;
+  return (i<SLOTS.length)?SLOTS[i]:null;
+}
+function nextLabel(roleName){
+  const n=pts.filter(p=>p.role===roleName).length;
+  const s=slotFor(roleName,n);
+  return s?`${roleName}: ${s}`:`${roleName} (extra, unused)`;
+}
+
+function updateButtons(){
+  if(SEQ && CHOICES.length){
+    // show which choices are used and which slot they got
+    CHOICES.forEach((c,i)=>{
+      const b=document.getElementById('bchoice'+i);
+      if(!b) return;
+      const used=pts.find(p=>p.label===c);
+      b.textContent=(i+1)+' · '+c+(used?' → slot '+(pts.indexOf(used)+1)+' ✓':'');
+    });
+  } else if(SEQ){
+    SLOTS.forEach((s,i)=>{
+      const b=document.getElementById('bslot'+i);
+      if(!b) return;
+      const has=pts.some(p=>p.slot===i);
+      b.textContent=(i+1)+' · '+s+(has?' ✓':'');
+    });
+  } else {
+    document.getElementById('bpick').textContent='1 · '+nextLabel('pick');
+    document.getElementById('bplace').textContent='2 · '+nextLabel('place');
+  }
+}
+
 function side(){
-  document.getElementById('side').innerHTML=eps.map((e,i)=>
-   `<div class="row${i===cur?' cur':''}" onclick="show(${i})">${e.done?'<span class=done>●</span> ':'○ '}${e.name}</div>`).join('');
+  document.getElementById('side').innerHTML=eps.map((e,i)=>{
+    let marker=e.done?'<span class=done>●</span> ':'○ ';
+    return `<div class="row${i===cur?' cur':''}" onclick="show(${i})">${marker}${e.name}</div>`;
+  }).join('');
 }
 async function show(i){
   cur=i; side();
   const e=eps[i];
   T=(await (await fetch('api/meta?path='+encodeURIComponent(e.path))).json()).T;
+  const sl=document.getElementById('sl');
   sl.max=T-1; t=0;
   pts=(await (await fetch('api/ann?name='+e.name)).json()).points||[];
-  draw();
+  draw(); updateButtons();
 }
 function draw(){
+  const sl=document.getElementById('sl');
   sl.value=t; document.getElementById('fr').textContent=t; document.getElementById('tt').textContent=T-1;
   img.onload=()=>{W=img.width;H=img.height;cv.width=W;cv.height=H;cx.drawImage(img,0,0);marks();};
   img.src='frame?path='+encodeURIComponent(eps[cur].path)+'&t='+t+'&_='+Date.now();
 }
 function marks(){
-  for(const p of pts){
-    cx.strokeStyle=cx.fillStyle=(p.role==='pick')?'#3c5':'#e93';
-    cx.lineWidth=2; cx.beginPath(); cx.arc(p.point[0],p.point[1],8,0,7); cx.stroke();
-    cx.beginPath(); cx.arc(p.point[0],p.point[1],2.5,0,7); cx.fill();
-    cx.font='13px system-ui';
-    cx.fillText(p.role+'@'+p.frame,p.point[0]+11,p.point[1]-8);
+  if(SEQ){
+    // sequential mode: each point shows its label (object name) and slot position
+    pts.forEach((p,i)=>{
+      const col=CHOICE_COLORS[p.label]||PALETTE[i%PALETTE.length];
+      cx.strokeStyle=cx.fillStyle=col;
+      cx.lineWidth=2; cx.beginPath(); cx.arc(p.point[0],p.point[1],8,0,7); cx.stroke();
+      cx.beginPath(); cx.arc(p.point[0],p.point[1],2.5,0,7); cx.fill();
+      cx.font='bold 13px system-ui';
+      const tag=(p.label||SLOTS[i]||'?')+' [slot '+(i+1)+']';
+      // dark outline for readability
+      cx.strokeStyle='#000'; cx.lineWidth=3; cx.strokeText(tag,p.point[0]+11,p.point[1]-8);
+      cx.fillText(tag,p.point[0]+11,p.point[1]-8);
+    });
+  } else {
+    const seen={pick:0,place:0};
+    for(const p of pts){
+      const s=slotFor(p.role,seen[p.role]); seen[p.role]++;
+      cx.strokeStyle=cx.fillStyle=(p.role==='pick')?'#3c5':'#e93';
+      cx.lineWidth=2; cx.beginPath(); cx.arc(p.point[0],p.point[1],8,0,7); cx.stroke();
+      cx.beginPath(); cx.arc(p.point[0],p.point[1],2.5,0,7); cx.fill();
+      cx.font='13px system-ui';
+      cx.fillText((s||(p.role+' extra!'))+'@'+p.frame,p.point[0]+11,p.point[1]-8);
+    }
   }
 }
 function setRole(r){role=r;
@@ -156,17 +283,58 @@ cv.onclick=ev=>{
   const r=cv.getBoundingClientRect();
   const x=(ev.clientX-r.left)*cv.width/r.width, y=(ev.clientY-r.top)*cv.height/r.height;
   const hit=pts.findIndex(p=>Math.hypot(p.point[0]-x,p.point[1]-y)<12);
-  if(hit>=0) pts.splice(hit,1); else pts.push({role:role,frame:t,point:[Math.round(x*10)/10,Math.round(y*10)/10]});
-  save(); draw();
+  if(hit>=0){
+    pts.splice(hit,1);
+  } else if(SEQ && CHOICES.length){
+    // choice mode: check this choice isn't already used
+    if(pts.some(p=>p.label===activeChoice)){
+      // already placed — replace it
+      const old=pts.findIndex(p=>p.label===activeChoice);
+      pts.splice(old,1);
+    }
+    if(pts.length>=SLOTS.length){
+      // all slots filled, don't add more
+    } else {
+      // append to the end — position = next slot
+      pts.push({label:activeChoice,frame:t,
+        point:[Math.round(x*10)/10,Math.round(y*10)/10]});
+      // auto-select next unused choice
+      for(let j=1;j<=CHOICES.length;j++){
+        const next=CHOICES[(CHOICES.indexOf(activeChoice)+j)%CHOICES.length];
+        if(!pts.some(p=>p.label===next)){
+          setChoice(next,CHOICES.indexOf(next)); break;
+        }
+      }
+    }
+  } else if(SEQ){
+    const si=parseInt(activeChoice.replace('__slot_',''));
+    const old=pts.findIndex(p=>p.slot===si);
+    if(old>=0) pts.splice(old,1);
+    pts.push({slot:si,frame:t,point:[Math.round(x*10)/10,Math.round(y*10)/10]});
+    for(let j=1;j<=SLOTS.length;j++){
+      const next=(si+j)%SLOTS.length;
+      if(!pts.some(p=>p.slot===next)){setSlotDirect(next);break;}
+    }
+  } else {
+    pts.push({role:role,frame:t,point:[Math.round(x*10)/10,Math.round(y*10)/10]});
+  }
+  save(); draw(); updateButtons();
 };
 async function save(){
   await fetch('api/ann',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({name:eps[cur].name,points:pts})});
   eps[cur].done=pts.length>0; side();
 }
-sl.oninput=()=>{t=+sl.value;draw();};
 document.onkeydown=e=>{
-  if(e.key==='1')setRole('pick'); if(e.key==='2')setRole('place');
+  if(SEQ && CHOICES.length){
+    const n=parseInt(e.key);
+    if(n>=1 && n<=CHOICES.length) setChoice(CHOICES[n-1],n-1);
+  } else if(SEQ){
+    const n=parseInt(e.key);
+    if(n>=1 && n<=SLOTS.length) setSlotDirect(n-1);
+  } else {
+    if(e.key==='1')setRole('pick'); if(e.key==='2')setRole('place');
+  }
   if(e.key==='a')t=Math.max(0,t-1); if(e.key==='d')t=Math.min(T-1,t+1);
   if(e.key==='w')t=Math.max(0,t-10); if(e.key==='s')t=Math.min(T-1,t+10);
   if('adws'.includes(e.key))draw();

@@ -276,6 +276,14 @@ Point the config at the result with `data.clicks: {source: annotations, annotati
 each episode's clicks become [picks (click order), then places], held constant over time —
 the order must match `data.slots` (manipulated object first).
 
+**Sequential mode** (`data.clicks.sequential: true`) — for tasks where the slot order follows
+what the demo does rather than a fixed pick/place split (PnP v5: `slots: [pick_1, pick_2, place_1]`).
+Marks fill slots in the order you click them. With `data.slot_choices` (e.g.
+`["pick 1", "pick 2", "place"]`) the toolbar shows one button per label (keys 1..N): select a
+label, click the object, and the next unused label is auto-selected. Each mark stores its
+label, and clicking a label again replaces its mark. Without `slot_choices`, there is one
+button per slot.
+
 ## Text: object-word segmenter (T5)
 
 `gam.text.T5ObjectSegmenter` turns an instruction into the object noun phrases it names,

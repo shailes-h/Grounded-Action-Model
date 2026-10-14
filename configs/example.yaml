@@ -18,9 +18,14 @@ data:
     dataset_key: clicks                      # (S,2) frame-0 px or (T,S,2) per-frame (dataset)
     # annotations source: labeling/annotator.py marks (picks then places, held constant)
     # annotations_dir: /path/annotations      # (annotations)
+    # sequential: false                      # (annotations) true: marks fill slots in click
+    #                                        #   order, NOT grouped picks-then-places
+    # n_picks: 1                             # annotator UI only: first n_picks slots are picks
     # language source: instruction -> gam.text segmenter -> pointing service -> frame-0 clicks
     # grounding_url: http://127.0.0.1:18092   # gam/planner/server.py (language)
     # segmenter_ckpt: /path/t5_segmenter.pt   # text/train_segmenter.py output (language)
+  # slot_choices: ["pick can", "place bowl"] # annotator UI only (sequential): one button per
+  #                                          #   label; each click fills the next slot
   val_episodes: 2                            # last N episodes held out for eval
 
 # ---------------------------------------------------------------- perception
