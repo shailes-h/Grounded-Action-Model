@@ -52,11 +52,33 @@ class PointTracker:
         self.p(video_chunk=f[None, None].to(self.dev), is_first_step=True, queries=q)
         self.buf, self.n = [f], 1
 
-    def push(self, rgb: np.ndarray):
+    def push(self, rgb: np.ndarray, force: bool = False):
+        """Push a new frame and return updated point positions.
+
+        Args:
+            rgb: new RGB frame (H, W, 3) uint8.
+            force: if True, pad the buffer to 16 frames (by repeating the new
+                   frame) so that CoTracker runs inference immediately instead
+                   of waiting for 16 natural frames.  Use this when the server
+                   receives frames sparsely (e.g. once per action chunk) rather
+                   than at video rate.
+        """
         if self.p is None or not self.pts:
             return self.pts
-        self.buf.append(self._frame(rgb)); self.n += 1
+        f = self._frame(rgb)
+        self.buf.append(f); self.n += 1
         self.buf = self.buf[-32:]
+        if force:
+            if self.n < 16:
+                # Pad buffer to 16 by repeating frames so CoTracker can
+                # run inference right away instead of waiting for 16 real frames.
+                pad_needed = 16 - len(self.buf)
+                self.buf = [self.buf[0]] * pad_needed + self.buf
+                self.n = 16
+            elif (self.n - 16) % self.p.step != 0:
+                # Align n to the next step boundary so every forced push
+                # triggers inference (frames arrive sparsely, ~1/s).
+                self.n = 16 + ((self.n - 16 + self.p.step - 1) // self.p.step) * self.p.step
         if self.n >= 16 and (self.n - 16) % self.p.step == 0:
             chunk = self._torch.stack(self.buf[-16:], 0)[None].to(self.dev)
             with self._torch.no_grad():

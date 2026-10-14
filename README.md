@@ -267,6 +267,17 @@ as precompute, predicts 16 steps and executes 15 with seam smoothing. For a real
 the GAM repository's `gam/deploy/` (Camera/Robot adapters + `run_real.py`) consumes the
 same checkpoints.
 
+### Real robot: HTTP policy server (bi-YAM)
+
+`scripts/host_gam_server.py` loads a checkpoint + its config and serves `POST /act` (one RGB-D
+frame + state + K/E + per-slot clicks → `(16, 14)` absolute joint targets), `POST /reset`,
+`GET /healthz`. It runs the same perception as precompute: WildDet3D, sensor depth, URDF
+silhouette. With `--track-clicks`, CoTracker3 online follows the first-frame clicks. The client
+also sends the frames between action chunks (`extra_frames_jpg`), so tracking sees dense video.
+`PointTracker.push(force=True)` pads/aligns the buffer so every sparse push runs inference.
+The robot-side client is `scripts/eval_reference_script.py`. The full procedure is in
+[`REPRODUCE_PNP_V5.md` §6](REPRODUCE_PNP_V5.md#6-serve-on-the-robot).
+
 ## Demo: end-to-end in sim
 
 `configs/demo_sim.yaml` is a complete worked example on simulator data (RoboTwin battery

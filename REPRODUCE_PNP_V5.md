@@ -108,6 +108,41 @@ and `params 302.4M`. Reference loss: 1.33 @ 50 → 0.17 @ 200 → 0.0032 @ 12000
 Optional open-loop check (not run for v5; it went straight to the robot):
 `python eval/eval_offline.py --config configs/pnp_v5.yaml --ckpt runs/pnp_v5/latest.pt`.
 
+## 6. Serve on the robot
+
+GPU node:
+
+```bash
+sbatch scripts/run_gam_v5_server.sh      # host_gam_server.py --checkpoint runs/pnp_v5/latest.pt
+                                         #   --config configs/pnp_v5.yaml --port 8204 --track-clicks
+# log: runs/pnp_v5/server_<job>.log; health: curl http://<node>:8204/healthz
+```
+
+Robot PC (LeRobot env with the `bi_yam_follower` robot), reference copy `scripts/eval_reference_script.py`:
+
+```bash
+python scripts/eval_reference_script.py \
+  --robot.left_arm_port=1235 --robot.right_arm_port=1234 \
+  --robot.cameras='{top: {"type": "intelrealsense", "serial_number_or_name": "262522075787",
+                          "width": 1280, "height": 720, "fps": 15, "use_depth": true}}' \
+  --server_url=http://<node>:8204/act \
+  --actions_per_chunk=16 --duration_s=300 --record_dataset=true
+```
+
+Always pass `--server_url`: the default in the file is a dead ngrok tunnel. If the robot PC can't
+reach the cluster directly, tunnel it (`ssh -L` or ngrok). Per episode:
+
+1. Click `pick_1`, `pick_2`, `place_1` on the first frame (matplotlib window).
+2. The client sends RGB + depth + 14-D state + K + cam2base E + clicks to `POST /act` and executes
+   the 16-step chunk. Between chunks it also sends the intermediate frames (`extra_frames_jpg`), so
+   the server's CoTracker sees dense video and keeps the clicks on the moving mints, as at
+   training time.
+3. `POST /reset` between episodes re-seeds the tracker.
+4. `debug_viz: true` returns an overlay JPEG per step, saved under the session's `debug_viz/`.
+
+The client hard-codes the same calibration as training (intrinsics above,
+`configs/calib/bi_yam_d435_cam2base.npy`); keep them in sync if the camera moves.
+
 ## Known issues / gotchas
 
 - HDF5s converted before the `_load_tasks` fix store `instruction` as the task index (0–3), not
