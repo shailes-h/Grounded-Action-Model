@@ -123,6 +123,27 @@ PNGs, else a constant placeholder plane), `observation.state_joint_angles` /
 intrinsics above are the visually tuned D435 (aligned-to-color, 1280×720) calibration for our
 rig; re-tune with `scripts/tune_extrinsic_web.py` if the camera moved.
 
+### Robot silhouette for the bimanual YAM
+
+`assets/robots/bi_yam/bi_yam.urdf` (+ STL meshes) is two prefixed copies (`left_`/`right_`)
+of I2RT's single-arm YAM (`i2rt-robotics/i2rt`, `robot_models/arm/yam/v1/yam.urdf`) on a shared
+`base_link`. Its mount offsets are **fitted to our rig** (left `y=+0.2272`, right `y=-0.2504` m):
+reuse the file as-is. `make_bimanual_yam_urdf.py` only regenerates the placeholder layout
+(`--arm-separation-m`, symmetric). Fitting tools, all against one real episode:
+
+```bash
+python scripts/inspect_robot_mask.py   --config <cfg> --episode episode_0000000  # translucent mask over N frames (interactive matplotlib)
+python scripts/tune_bimanual_urdf.py   --config <cfg> --episode episode_0000000  # sliders: arm distance, x/y/z, roll/pitch/yaw
+python scripts/optimize_bimanual_urdf.py --config <cfg> --episode episode_0000000 [--method de]
+#   minimises mean pixel darkness under the mask (the arms are black) over 30 frames
+```
+
+Nothing writes the config or the URDF: paste the printed `T_base_root` into `perception.robot`,
+and the printed `left/right_arm_dist_m` into the `left_mount`/`right_mount` joint `y` in the URDF.
+The gripper state is normalised `[0,1]` (1 = open) and maps onto the URDF prismatic range
+via `joint_affine: {left_joint7: [0.0, -0.04695], ...}` + `joint_mirror` for the second finger.
+The tuning tools need a display (X forwarding or a desktop session).
+
 ## 2. Label clicks (only if you have neither sim ground truth nor recorded clicks)
 
 ```bash
