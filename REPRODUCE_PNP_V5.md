@@ -35,7 +35,7 @@ hand clicks (`labeling/annotations/episode_*.json`, 102 files), the URDF + meshe
 ## 0. Environment
 
 ```bash
-git clone -b yam-shailesh-fork git@github.com:GehaoZhang6/Grounding-Action-Model.git ~/GAM_train_ready
+git clone -b yam-shailesh-fork https://github.com/shailes-h/Grounded-Action-Model.git ~/GAM_train_ready
 cd ~/GAM_train_ready
 conda create -n gam python=3.10 -y && conda activate gam
 pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
