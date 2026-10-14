@@ -121,7 +121,8 @@ PNGs, else a constant placeholder plane), `observation.state_joint_angles` /
 `action_joint_angles` as state/action. Video frame index = `(from_timestamp + timestamp) * fps`
 (LeRobot's `timestamp` is episode-relative). `configs/calib/bi_yam_d435_cam2base.npy` and the
 intrinsics above are the visually tuned D435 (aligned-to-color, 1280×720) calibration for our
-rig; re-tune with `scripts/tune_extrinsic_web.py` if the camera moved.
+rig. If the camera moved, check the new calibration with `scripts/inspect_pcd_alignment.py`
+(see *Camera / robot alignment checks* below).
 
 ### Robot silhouette for the bimanual YAM
 
@@ -143,6 +144,18 @@ and the printed `left/right_arm_dist_m` into the `left_mount`/`right_mount` join
 The gripper state is normalised `[0,1]` (1 = open) and maps onto the URDF prismatic range
 via `joint_affine: {left_joint7: [0.0, -0.04695], ...}` + `joint_mirror` for the second finger.
 The tuning tools need a display (X forwarding or a desktop session).
+
+### Camera / robot alignment checks
+
+```bash
+python scripts/inspect_pcd_alignment.py --config <cfg> --episode episode_0000000 --out pcd.png
+#  top: full depth -> world -> re-projected (green must cover the scene without offset)
+#  middle: cached per-slot point clouds + clicks + 2D boxes (needs the precompute cache)
+#  bottom: depth with the projected slot centres
+python scripts/tune_extrinsic_web.py --config <cfg> [--port 8871]   # browser, headless-friendly
+#  sliders nudge perception.robot.T_base_root until the URDF mesh (red) sits on the
+#  depth points of the arms (cyan); "Save" prints the matrix to paste into the config
+```
 
 ## 2. Label clicks (only if you have neither sim ground truth nor recorded clicks)
 
