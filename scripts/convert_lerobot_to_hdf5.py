@@ -54,7 +54,9 @@ import pandas as pd
 def _load_tasks(dataset_dir: str) -> dict:
     tasks_path = os.path.join(dataset_dir, "meta", "tasks.parquet")
     df = pd.read_parquet(tasks_path)
-    # index is the task string, column 'task_index' is the int id
+    # either a `task` column (e.g. PnP_version5) or the task string as the index
+    if "task" in df.columns:
+        return {int(r.task_index): str(r.task) for r in df.itertuples()}
     return {int(row.task_index): task for task, row in df.iterrows()}
 
 
